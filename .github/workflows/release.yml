@@ -1,0 +1,121 @@
+name: Release
+
+# Push a tag such as `v0.1.0` to build Windows, Linux and macOS binaries and publish them
+# together in one GitHub release. "Run workflow" builds them without publishing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  APP: layr
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+          - name: linux-x64
+            os: ubuntu-22.04
+          - name: macos-universal
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the compiler; rustup installs it on first use.
+      - name: Rust toolchain
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          fi
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Test
+        if: runner.os != 'macOS'
+        run: cargo test --release --locked
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo build --release --locked
+          mkdir -p dist/pkg
+          cp target/release/$APP.exe README.md dist/pkg/
+          cp assets/Inter-LICENSE.txt dist/pkg/
+          (cd dist/pkg && 7z a ../$APP-${{ matrix.name }}.zip .)
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release --locked
+          mkdir -p dist/$APP
+          cp target/release/$APP README.md assets/Inter-LICENSE.txt dist/$APP/
+          cp assets/icon/icon.png dist/$APP/layr.png
+          cp packaging/linux/layr.desktop dist/$APP/
+          tar -C dist -czf dist/$APP-${{ matrix.name }}.tar.gz $APP
+
+      - name: Build (macOS universal app)
+        if: runner.os == 'macOS'
+        run: |
+          cargo test --release --locked
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          APPDIR="dist/Layr.app/Contents"
+          mkdir -p "$APPDIR/MacOS" "$APPDIR/Resources"
+          lipo -create -output "$APPDIR/MacOS/$APP" \
+            target/aarch64-apple-darwin/release/$APP target/x86_64-apple-darwin/release/$APP
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          sed "s/__VERSION__/$VERSION/g" packaging/macos/Info.plist > "$APPDIR/Info.plist"
+          cp assets/Inter-LICENSE.txt "$APPDIR/Resources/"
+          cp assets/icon/AppIcon.icns "$APPDIR/Resources/"
+          # Ad-hoc signature so Apple silicon runs it; it is not notarized.
+          codesign --force --deep --sign - "dist/Layr.app"
+          (cd dist && ditto -c -k --keepParent "Layr.app" $APP-${{ matrix.name }}.zip)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the release with every platform's archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la dist
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Layr $GITHUB_REF_NAME" \
+            --generate-notes

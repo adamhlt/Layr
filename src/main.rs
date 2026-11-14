@@ -1,0 +1,50 @@
+//! Layr: annotate photos with boxes, hatched zones, wires, arrows, markers and captions,
+//! then export the result at full resolution.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+mod color;
+mod cursors;
+mod editor;
+mod font;
+mod legend;
+mod measure;
+mod model;
+mod mouse;
+mod pdf;
+mod render;
+mod ui;
+mod vector;
+
+use rune::AppSpec;
+
+use editor::Editor;
+
+fn init() -> Editor {
+    let mut e = Editor::new();
+    // `layr photo.jpg` opens the photo; Rune's own flags (and their values) follow it.
+    if let Some(path) = std::env::args().nth(1).filter(|a| !a.starts_with('-')) {
+        e.load(std::path::Path::new(&path));
+    }
+    e
+}
+
+fn poll(s: &mut Editor, _: f64, _: &mut rune::Tx) -> bool {
+    s.refresh()
+}
+
+fn main() {
+    // The executable carries the icon on Windows (build.rs). On macOS the Dock takes it from
+    // the PNG, which also covers a run outside the app bundle; Linux reads the .desktop file.
+    #[cfg(windows)]
+    rune::set_app_icon_resource(1);
+    #[cfg(target_os = "macos")]
+    if let Err(e) = rune::set_app_icon(include_bytes!("../assets/icon/icon-macos.png").as_slice()) {
+        eprintln!("layr: {e}");
+    }
+    rune::run(AppSpec {
+        min_size: Some((900.0, 600.0)),
+        poll: Some(poll),
+        on_key: Some(ui::on_key),
+        ..AppSpec::new("Layr", (1400.0, 900.0), init, ui::view)
+    });
+}

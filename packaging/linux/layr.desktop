@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Layr
+Comment=Annotate images with boxes, wires, measures and captions
+Exec=layr %f
+Icon=layr
+Terminal=false
+Categories=Graphics;2DGraphics;
+MimeType=image/png;image/jpeg;image/webp;image/bmp;

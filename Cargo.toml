@@ -1,0 +1,50 @@
+[package]
+name = "layr"
+version = "0.1.0"
+edition = "2024"
+description = "Annotate images with overlays: boxes, hatched zones, wires, arrows, markers and captions."
+
+[[bin]]
+name = "layr"
+path = "src/main.rs"
+
+[dependencies]
+# Rune is pre-release: pin a `dev` revision, and patch the crates its root Cargo.toml patches
+# at that same revision (Cargo doesn't inherit patches from a dependency).
+rune = { git = "https://github.com/anomalyco/rune", rev = "412aa96331be32ab9e64bfe77ed98eca8049518a", features = ["native-file-dialog"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
+tiny-skia = "0.11"
+ab_glyph = "0.2"
+fontdb = "0.23"
+pdf-writer = "0.15.0"
+ttf-parser = "0.25.1"
+
+[build-dependencies]
+winresource = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSEvent"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = "0.13"
+
+[patch.crates-io]
+winit = { git = "https://github.com/anomalyco/rune", rev = "412aa96331be32ab9e64bfe77ed98eca8049518a" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "412aa96331be32ab9e64bfe77ed98eca8049518a" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "412aa96331be32ab9e64bfe77ed98eca8049518a" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "412aa96331be32ab9e64bfe77ed98eca8049518a" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "412aa96331be32ab9e64bfe77ed98eca8049518a" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
