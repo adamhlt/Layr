@@ -51,6 +51,10 @@ documentation and annotated screenshots.
 Get the latest build for Windows, macOS or Linux from
 [**Releases**](https://github.com/adamhlt/Layr/releases/latest).
 
+Layr checks for a new release at startup and offers to update itself (Windows setup or portable,
+macOS app, Linux x86-64); anywhere else it links to the release page. Set `LAYR_NO_UPDATE_CHECK=1` to turn the
+startup check off.
+
 On macOS the app isn't notarized: the first time, right-click it and choose **Open**.
 
 ## Build

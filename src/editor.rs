@@ -153,6 +153,7 @@ pub struct Editor {
     pub font_query: TextEdit,
 
     pub status: String,
+    pub updater: crate::update::Updater,
 }
 
 impl Editor {
@@ -199,6 +200,7 @@ impl Editor {
             export: ExportOptions::default(),
             font_query: TextEdit::new(""),
             status: "Open an image (Ctrl+O) or drop one on the window.".into(),
+            updater: crate::update::Updater::new(),
         }
     }
 

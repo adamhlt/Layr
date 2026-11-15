@@ -14,6 +14,7 @@ use crate::editor::{Editor, Hover, PanelTab, Tool};
 use crate::measure::Unit;
 use crate::model::{Annotation, BadgeShape, Hatch, Kind, PALETTE, Rgba, Shape as Geo, Style};
 use crate::render::{ExportOptions, Format};
+use crate::update::{self, State};
 use crate::{cursors, font, vector};
 
 const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "bmp"];
@@ -1168,6 +1169,53 @@ fn color_editor(s: &Editor, tool: &ColorTool, accent: Color) -> El {
         .child(card.modal(true, |s: &mut Editor| s.color_tool = None))
 }
 
+// ---- Updates ----------------------------------------------------------------------------------
+
+/// A bar above the status line when a newer release exists, with what can be done about it.
+fn update_banner(s: &Editor, accent: Color) -> Option<El> {
+    let t = theme();
+    let open_page = |s: &mut Editor| {
+        if let Some(url) = s.updater.page() {
+            update::open_url(&url);
+        }
+    };
+    let release = button("update-page", "Release page", false, true, accent).on_press(open_page);
+    let close = button("update-close", "Dismiss", false, true, accent).on_press(|s: &mut Editor| s.updater.dismiss());
+    let (message, buttons): (String, Vec<El>) = match &s.updater.state {
+        State::Available(o) if o.can_install() => (
+            format!("Layr {} is available (you have {}).", o.release.version, update::VERSION),
+            vec![button("update-install", "Update now", true, true, accent).on_press(|s: &mut Editor| s.updater.install()), release, close],
+        ),
+        State::Available(o) => (
+            format!("Layr {} is available (you have {}). Download it from its release page.", o.release.version, update::VERSION),
+            vec![button("update-page", "Open release page", true, true, accent).on_press(open_page), close],
+        ),
+        State::Downloading { offer, done, total } => {
+            let pct = if *total > 0 { format!(" {} %", (done * 100 / total).min(100)) } else { String::new() };
+            (format!("Downloading Layr {}…{pct}", offer.release.version), Vec::new())
+        }
+        State::Installing(offer) => (format!("Installing Layr {}… the app restarts by itself.", offer.release.version), Vec::new()),
+        State::Failed { offer, message } => (
+            format!("Couldn't update to Layr {}: {message}", offer.release.version),
+            vec![button("update-page", "Open release page", true, true, accent).on_press(open_page), close],
+        ),
+        State::Idle | State::Checking => return None,
+    };
+    Some(
+        row()
+            .key("update-banner")
+            .w_full()
+            .h(40.0)
+            .px(12.0)
+            .gap(8.0)
+            .items_center()
+            .fill(t.card)
+            .border(1.0, t.card_border)
+            .child(el().grow(1.0).min_w(0.0).child(text(message).font(type_::LABEL).color(t.text).truncate()))
+            .children(buttons),
+    )
+}
+
 // ---- Window -----------------------------------------------------------------------------------
 
 pub fn view(s: &Editor, cx: &mut Cx<Editor>) -> El {
@@ -1190,7 +1238,18 @@ pub fn view(s: &Editor, cx: &mut Cx<Editor>) -> El {
         .px(12.0)
         .items_center()
         .fill(t.card)
-        .child(text(&s.status).font(type_::LABEL).color(t.text_secondary).truncate());
+        .gap(8.0)
+        .child(el().grow(1.0).min_w(0.0).child(text(&s.status).font(type_::LABEL).color(t.text_secondary).truncate()))
+        .child(
+            row()
+                .key("version")
+                .role("button")
+                .label("Check for updates")
+                .items_center()
+                .cursor(Cursor::Pointer)
+                .child(text(format!("Layr {}", update::VERSION)).font(type_::LABEL).color(t.text_secondary))
+                .on_press(|s: &mut Editor| s.updater.check(true)),
+        );
     let mut root = col()
         .key("root")
         .w_full()
@@ -1221,6 +1280,7 @@ pub fn view(s: &Editor, cx: &mut Cx<Editor>) -> El {
                 .children(s.selection().is_some().then(|| el().w(1.0).h_full().fill(t.separator)))
                 .children(s.selection().is_some().then_some(panel)),
         )
+        .children(update_banner(s, accent))
         .child(status);
     if let Some(tool) = &s.color_tool {
         root = root.child(color_editor(s, tool, accent));

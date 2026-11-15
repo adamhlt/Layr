@@ -15,6 +15,7 @@ mod mouse;
 mod pdf;
 mod render;
 mod ui;
+mod update;
 mod vector;
 
 use rune::AppSpec;
@@ -27,11 +28,17 @@ fn init() -> Editor {
     if let Some(path) = std::env::args().nth(1).filter(|a| !a.starts_with('-')) {
         e.load(std::path::Path::new(&path));
     }
+    update::cleanup();
+    e.updater.check(false);
     e
 }
 
-fn poll(s: &mut Editor, _: f64, _: &mut rune::Tx) -> bool {
-    s.refresh()
+fn poll(s: &mut Editor, _: f64, tx: &mut rune::Tx) -> bool {
+    let updated = s.updater.poll(tx);
+    if let Some(note) = s.updater.notice.take() {
+        s.status = note;
+    }
+    s.refresh() | updated
 }
 
 fn main() {
