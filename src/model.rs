@@ -254,6 +254,58 @@ fn dist_to_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
 }
 
 /// Snaps `p` so the segment from `from` runs at a multiple of 45°.
+/// `[x, y, w, h]` with the edges in `moves` (left, top, right, bottom) dragged to `p`. With
+/// `keep_ratio` the shape keeps its proportions: the opposite corner or edge stays put, and a
+/// side handle grows the other direction evenly about the middle.
+pub fn resize_rect(o: [f32; 4], moves: [bool; 4], p: [f32; 2], keep_ratio: bool) -> [f32; 4] {
+    let [x, y, w, h] = o;
+    let [ml, mt, mr, mb] = moves;
+    let (mut l, mut t, mut r, mut b) = (x, y, x + w, y + h);
+    if ml {
+        l = p[0];
+    }
+    if mr {
+        r = p[0];
+    }
+    if mt {
+        t = p[1];
+    }
+    if mb {
+        b = p[1];
+    }
+    let (horiz, vert) = (ml || mr, mt || mb);
+    if keep_ratio && w > 0.0 && h > 0.0 && (horiz || vert) {
+        let (sx, sy) = ((r - l).abs() / w, (b - t).abs() / h);
+        let s = match (horiz, vert) {
+            (true, true) => sx.max(sy),
+            (true, false) => sx,
+            _ => sy,
+        };
+        let (nw, nh) = (w * s, h * s);
+        // Which way from the fixed edge the dragged one went (away from it when level).
+        let side = |v: f32, anchor: f32, away: f32| if v != anchor { (v - anchor).signum() } else { away };
+        (l, r) = if ml {
+            let a = x + w;
+            (a + side(p[0], a, -1.0) * nw, a)
+        } else if mr {
+            (x, x + side(p[0], x, 1.0) * nw)
+        } else {
+            let c = x + w / 2.0;
+            (c - nw / 2.0, c + nw / 2.0)
+        };
+        (t, b) = if mt {
+            let a = y + h;
+            (a + side(p[1], a, -1.0) * nh, a)
+        } else if mb {
+            (y, y + side(p[1], y, 1.0) * nh)
+        } else {
+            let c = y + h / 2.0;
+            (c - nh / 2.0, c + nh / 2.0)
+        };
+    }
+    [l.min(r), t.min(b), (r - l).abs(), (b - t).abs()]
+}
+
 pub fn snap45(from: [f32; 2], p: [f32; 2]) -> [f32; 2] {
     let (dx, dy) = (p[0] - from[0], p[1] - from[1]);
     let len = (dx * dx + dy * dy).sqrt();
@@ -323,22 +375,24 @@ impl Annotation {
         }
     }
 
-    /// Moves handle `i` of `orig` to `p`, writing the result into `self`.
-    pub fn drag_handle(&mut self, orig: &Annotation, i: Handle, p: [f32; 2], shift: bool) {
+    /// Moves handle `i` of `orig` to `p`, writing the result into `self`. `shift` snaps lines
+    /// to 45°; `keep_ratio` keeps a box's proportions.
+    pub fn drag_handle(&mut self, orig: &Annotation, i: Handle, p: [f32; 2], shift: bool, keep_ratio: bool) {
         self.shape = match &orig.shape {
             Shape::Rect { x, y, w, h } => {
-                let (mut l, mut t, mut r, mut b) = (*x, *y, x + w, y + h);
-                match i {
-                    0 => (l, t) = (p[0], p[1]),
-                    1 => (r, t) = (p[0], p[1]),
-                    2 => (r, b) = (p[0], p[1]),
-                    3 => (l, b) = (p[0], p[1]),
-                    4 => t = p[1],
-                    5 => r = p[0],
-                    6 => b = p[1],
-                    _ => l = p[0],
-                }
-                Shape::Rect { x: l.min(r), y: t.min(b), w: (r - l).abs(), h: (b - t).abs() }
+                // Handles: the corners clockwise from the top left, then the edges' middles.
+                let moves = match i {
+                    0 => [true, true, false, false],
+                    1 => [false, true, true, false],
+                    2 => [false, false, true, true],
+                    3 => [true, false, false, true],
+                    4 => [false, true, false, false],
+                    5 => [false, false, true, false],
+                    6 => [false, false, false, true],
+                    _ => [true, false, false, false],
+                };
+                let [x, y, w, h] = resize_rect([*x, *y, *w, *h], moves, p, keep_ratio);
+                Shape::Rect { x, y, w, h }
             }
             Shape::Polyline { points } => {
                 let mut points = points.clone();
@@ -396,6 +450,34 @@ pub fn bbox(points: &[[f32; 2]]) -> [f32; 4] {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_corner_keeps_the_ratio_with_the_opposite_corner_fixed() {
+        // 200 × 100 from (100, 100); its bottom right is (300, 200).
+        let o = [100.0, 100.0, 200.0, 100.0];
+        let tl = [true, true, false, false];
+        assert_eq!(resize_rect(o, tl, [0.0, 90.0], true), [0.0, 50.0, 300.0, 150.0], "the larger change wins");
+        assert_eq!(resize_rect(o, tl, [0.0, 90.0], false), [0.0, 90.0, 300.0, 110.0]);
+        // Dragged past the fixed corner, the shape flips over and still keeps 2:1.
+        assert_eq!(resize_rect(o, tl, [340.0, 220.0], true), [300.0, 200.0, 40.0, 20.0]);
+    }
+
+    #[test]
+    fn a_side_keeps_the_ratio_about_the_middle() {
+        let o = [100.0, 100.0, 200.0, 100.0];
+        // The right edge out by 200: twice as wide, so twice as tall, around the same middle.
+        assert_eq!(resize_rect(o, [false, false, true, false], [500.0, 0.0], true), [100.0, 50.0, 400.0, 200.0]);
+        // The top edge down by 50: half as tall, half as wide, centred.
+        assert_eq!(resize_rect(o, [false, true, false, false], [0.0, 150.0], true), [150.0, 150.0, 100.0, 50.0]);
+    }
+
+    #[test]
+    fn a_circle_badge_stays_round() {
+        let o = [10.0, 10.0, 60.0, 60.0];
+        let r = resize_rect(o, [false, false, true, true], [150.0, 90.0], true);
+        assert_eq!(r[2], r[3]);
+        assert_eq!(r, [10.0, 10.0, 140.0, 140.0]);
+    }
+
     fn rect() -> Annotation {
         Annotation {
             id: 1,
@@ -411,7 +493,7 @@ mod tests {
     fn dragging_a_corner_past_the_opposite_one_flips_the_box() {
         let orig = rect();
         let mut a = orig.clone();
-        a.drag_handle(&orig, 0, [200.0, 100.0], false);
+        a.drag_handle(&orig, 0, [200.0, 100.0], false, false);
         assert_eq!(a.shape, Shape::Rect { x: 110.0, y: 60.0, w: 90.0, h: 40.0 });
     }
 

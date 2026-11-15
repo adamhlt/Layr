@@ -62,6 +62,7 @@ or drop them on the window.
 | `Ctrl+F` · wheel | Fit to window · zoom |
 | `Space` + drag, middle or right button | Pan the view |
 | `Shift` | Square boxes, lines at 45° |
+| `Ctrl` + drag a handle | Resize and keep the proportions |
 | `Enter` / `Esc` | Use or cancel the area being selected for export |
 
 ## Download

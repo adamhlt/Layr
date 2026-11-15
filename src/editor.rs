@@ -326,7 +326,7 @@ impl Editor {
     }
 
     /// A drag on the canvas while choosing the export area: draws, moves or resizes it.
-    fn crop_drag(&mut self, d: &Drag, q: [f32; 2], p: [f32; 2]) {
+    fn crop_drag(&mut self, d: &Drag, q: [f32; 2], p: [f32; 2], keep_ratio: bool) {
         let Some(pic) = &self.picture else { return };
         let (iw, ih) = pic.size();
         let p = [p[0].clamp(0.0, iw), p[1].clamp(0.0, ih)];
@@ -364,18 +364,22 @@ impl Editor {
                 [o[0] + dx, o[1] + dy, o[2], o[3]]
             }
             CropGrab::Handle(i) => {
-                let (mut l, mut t, mut r, mut b) = (o[0], o[1], o[0] + o[2], o[1] + o[3]);
-                match i {
-                    0 => (l, t) = (p[0], p[1]),
-                    1 => t = p[1],
-                    2 => (r, t) = (p[0], p[1]),
-                    3 => r = p[0],
-                    4 => (r, b) = (p[0], p[1]),
-                    5 => b = p[1],
-                    6 => (l, b) = (p[0], p[1]),
-                    _ => l = p[0],
-                }
-                [l.min(r), t.min(b), (r - l).abs(), (b - t).abs()]
+                // `crop_handles` order: clockwise from the top left, corners and edges.
+                let moves = match i {
+                    0 => [true, true, false, false],
+                    1 => [false, true, false, false],
+                    2 => [false, true, true, false],
+                    3 => [false, false, true, false],
+                    4 => [false, false, true, true],
+                    5 => [false, false, false, true],
+                    6 => [true, false, false, true],
+                    _ => [true, false, false, false],
+                };
+                let r = crate::model::resize_rect(o, moves, p, keep_ratio);
+                // Kept proportions may reach past the image: the area stops at its edges.
+                let (x0, y0) = (r[0].max(0.0), r[1].max(0.0));
+                let (x1, y1) = ((r[0] + r[2]).min(iw), (r[1] + r[3]).min(ih));
+                [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)]
             }
         };
         self.export.custom = Some(next);
@@ -806,11 +810,13 @@ impl Editor {
         let q = [d.x, d.y];
         let p = self.to_image(q);
         let shift = tx.mods().shift;
+        // Ctrl (or ⌘) resizes without changing the proportions.
+        let keep_ratio = tx.mods().ctrl || tx.mods().cmd;
         // Choosing the export area takes the canvas, except to pan it.
         if self.crop_pick && self.picture.is_some() {
             let pan = d.phase == Phase::Down && (self.space || tx.button() == PointerButton::Middle);
             if !pan && !matches!(self.gesture, Gesture::Pan { .. }) {
-                self.crop_drag(d, q, p);
+                self.crop_drag(d, q, p, keep_ratio);
                 return;
             }
         }
@@ -842,7 +848,7 @@ impl Editor {
             }
             Gesture::Handle { orig, handle, .. } => {
                 if let Some(a) = self.get_mut(orig.id) {
-                    a.drag_handle(&orig, handle, p, shift);
+                    a.drag_handle(&orig, handle, p, shift, keep_ratio);
                 }
                 if let Gesture::Handle { changed, .. } = &mut self.gesture {
                     *changed = true;
