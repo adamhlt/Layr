@@ -47,7 +47,13 @@ jobs:
       - name: Version from the tag
         if: env.TAG != ''
         shell: bash
-        run: echo "LAYR_VERSION=${TAG#v}" >> "$GITHUB_ENV"
+        run: |
+          # Code from before the version came from the tag would quietly report Cargo.toml's.
+          if ! grep -q LAYR_VERSION src/update.rs; then
+            echo "::error::$TAG points at code that can't take its version from the tag: move the tag to a newer commit (git tag -f $TAG <commit> && git push -f origin $TAG)."
+            exit 1
+          fi
+          echo "LAYR_VERSION=${TAG#v}" >> "$GITHUB_ENV"
 
       # rust-toolchain.toml pins the compiler; rustup installs it on first use.
       - name: Rust toolchain
