@@ -4,7 +4,7 @@ name: Release
 # together in one GitHub release. "Run workflow" builds them without publishing.
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "[0-9]*"]
   workflow_dispatch:
 
 permissions:
@@ -30,6 +30,13 @@ jobs:
             os: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      # The release's version is its tag (`v1.2` or `1.2`): the app reports it, and compares it
+      # with the latest release to offer updates, so it must not stay at Cargo.toml's.
+      - name: Version from the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: echo "LAYR_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
       # rust-toolchain.toml pins the compiler; rustup installs it on first use.
       - name: Rust toolchain
@@ -65,7 +72,7 @@ jobs:
           cp assets/Inter-LICENSE.txt dist/pkg/
           # A portable zip, and an installer built with Inno Setup.
           (cd dist/pkg && 7z a ../$APP-${{ matrix.name }}-portable.zip .)
-          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          VERSION=${LAYR_VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}
           ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
           if [ ! -f "$ISCC" ]; then choco install innosetup --no-progress -y; fi
           # MSYS_NO_PATHCONV keeps Git Bash from rewriting the /D switches as paths.
@@ -91,7 +98,7 @@ jobs:
           mkdir -p "$APPDIR/MacOS" "$APPDIR/Resources"
           lipo -create -output "$APPDIR/MacOS/$APP" \
             target/aarch64-apple-darwin/release/$APP target/x86_64-apple-darwin/release/$APP
-          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          VERSION=${LAYR_VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}
           sed "s/__VERSION__/$VERSION/g" packaging/macos/Info.plist > "$APPDIR/Info.plist"
           cp LICENSE assets/Inter-LICENSE.txt "$APPDIR/Resources/"
           cp assets/icon/AppIcon.icns "$APPDIR/Resources/"

@@ -58,18 +58,47 @@ pub struct Progress {
     cancel: AtomicBool,
     frac: AtomicU32,
     stage: Mutex<String>,
+    /// Wakes the window, which draws nothing while idle, when there is progress to show.
+    waker: Option<rune::Waker>,
+    /// The fraction last shown, in thousandths.
+    shown: AtomicU32,
 }
 
 impl Progress {
+    #[cfg(test)]
     pub fn new() -> Progress {
-        Progress { cancel: AtomicBool::new(false), frac: AtomicU32::new(0), stage: Mutex::new(String::new()) }
+        Progress::with_waker(None)
+    }
+
+    pub fn with_waker(waker: Option<rune::Waker>) -> Progress {
+        Progress {
+            cancel: AtomicBool::new(false),
+            frac: AtomicU32::new(0),
+            stage: Mutex::new(String::new()),
+            waker,
+            shown: AtomicU32::new(0),
+        }
     }
 
     pub fn set(&self, stage: &str, frac: f32) {
-        self.frac.store(frac.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
-        let mut s = self.lock();
-        if *s != stage {
-            *s = stage.to_string();
+        let frac = frac.clamp(0.0, 1.0);
+        self.frac.store(frac.to_bits(), Ordering::Relaxed);
+        let new_stage = {
+            let mut s = self.lock();
+            let new = *s != stage;
+            if new {
+                *s = stage.to_string();
+            }
+            new
+        };
+        // Redraw for a new stage or every half percent, not for every tile.
+        let milli = (frac * 1000.0) as u32;
+        let moved = milli.abs_diff(self.shown.load(Ordering::Relaxed)) >= 5;
+        if (new_stage || moved)
+            && let Some(w) = &self.waker
+        {
+            self.shown.store(milli, Ordering::Relaxed);
+            w();
         }
     }
 

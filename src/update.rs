@@ -22,11 +22,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
-use rune::Tx;
+use rune::{Tx, Waker};
 use sha2::{Digest, Sha256};
 
 const REPO: &str = "adamhlt/Layr";
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The release's version: its tag when the release workflow built it (`LAYR_VERSION`), else
+/// Cargo.toml's.
+pub const VERSION: &str = match option_env!("LAYR_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 // ---- What a release is ------------------------------------------------------------------------
 
@@ -244,11 +249,24 @@ pub struct Updater {
     done: Arc<AtomicU64>,
     /// A line for the status bar, taken by the window.
     pub notice: Option<String>,
+    /// Wakes the window when the background thread has news: an idle window draws nothing,
+    /// so without it the progress would only show on the next mouse move.
+    waker: Option<Waker>,
+}
+
+fn wake(w: &Option<Waker>) {
+    if let Some(w) = w {
+        w();
+    }
 }
 
 impl Updater {
     pub fn new() -> Updater {
-        Updater { state: State::Idle, rx: None, done: Arc::new(AtomicU64::new(0)), notice: None }
+        Updater { state: State::Idle, rx: None, done: Arc::new(AtomicU64::new(0)), notice: None, waker: None }
+    }
+
+    pub fn set_waker(&mut self, w: Waker) {
+        self.waker = Some(w);
     }
 
     fn busy(&self) -> bool {
@@ -267,6 +285,7 @@ impl Updater {
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.state = State::Checking;
+        let waker = self.waker.clone();
         std::thread::spawn(move || {
             let result = fetch_latest().map(|release| {
                 if !is_newer(&release.version, VERSION) {
@@ -280,6 +299,7 @@ impl Updater {
                 Some(Offer { release, method, asset })
             });
             let _ = tx.send(Msg::Checked { manual, result });
+            wake(&waker);
         });
     }
 
@@ -292,13 +312,14 @@ impl Updater {
         self.done.store(0, Ordering::Relaxed);
         self.state = State::Downloading { done: 0, total: asset.size, offer: offer.clone() };
         let done = self.done.clone();
-        std::thread::spawn(move || match run_install(&offer, &asset, &done, &tx) {
-            Ok(()) => {
-                let _ = tx.send(Msg::Restart);
-            }
-            Err(e) => {
-                let _ = tx.send(Msg::Failed(e));
-            }
+        let waker = self.waker.clone();
+        std::thread::spawn(move || {
+            let msg = match run_install(&offer, &asset, &done, &tx, &waker) {
+                Ok(()) => Msg::Restart,
+                Err(e) => Msg::Failed(e),
+            };
+            let _ = tx.send(msg);
+            wake(&waker);
         });
     }
 
@@ -379,33 +400,20 @@ fn fetch_latest() -> Result<Release, String> {
     parse_release(&json).ok_or_else(|| "unexpected answer from GitHub".to_string())
 }
 
-fn download(asset: &Asset, dest: &Path, done: &AtomicU64) -> Result<(), String> {
+fn download(asset: &Asset, dest: &Path, done: &AtomicU64, waker: &Option<Waker>) -> Result<(), String> {
     // Only ever fetch from GitHub, whatever the answer said.
     if !asset.url.starts_with(&format!("https://github.com/{REPO}/releases/download/")) {
         return Err("unexpected download address".into());
     }
     let resp = agent(Duration::from_secs(900)).get(&asset.url).call().map_err(|e| e.to_string())?;
-    let mut body = resp.into_body().into_reader();
     let mut file = File::create(dest).map_err(|e| e.to_string())?;
-    let mut hash = Sha256::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    let mut total = 0u64;
-    loop {
-        let n = body.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-        hash.update(&buf[..n]);
-        total += n as u64;
-        done.store(total, Ordering::Relaxed);
-    }
+    let (total, hash) = copy_counting(&mut resp.into_body().into_reader(), &mut file, asset.size, done, &|| wake(waker))?;
     file.flush().map_err(|e| e.to_string())?;
     if asset.size > 0 && total != asset.size {
         return Err(format!("the download is incomplete ({total} of {} bytes)", asset.size));
     }
     if let Some(want) = &asset.sha256 {
-        let got: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let got: String = hash.iter().map(|b| format!("{b:02x}")).collect();
         if &got != want {
             return Err("the download doesn't match its checksum".into());
         }
@@ -413,16 +421,47 @@ fn download(asset: &Asset, dest: &Path, done: &AtomicU64) -> Result<(), String> 
     Ok(())
 }
 
+/// Copies `from` into `to`, counting the bytes in `done` and hashing them, and calls `wake`
+/// each whole percent of `size` (or every 256 KB when the size is unknown).
+fn copy_counting(
+    from: &mut impl Read,
+    to: &mut impl Write,
+    size: u64,
+    done: &AtomicU64,
+    wake: &dyn Fn(),
+) -> Result<(u64, Vec<u8>), String> {
+    let mut hash = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut total = 0u64;
+    let step = (size / 100).clamp(1, 256 * 1024);
+    loop {
+        let n = from.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        to.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        hash.update(&buf[..n]);
+        let before = total;
+        total += n as u64;
+        done.store(total, Ordering::Relaxed);
+        if before / step != total / step {
+            wake();
+        }
+    }
+    Ok((total, hash.finalize().to_vec()))
+}
+
 // ---- Applying ---------------------------------------------------------------------------------
 
-fn run_install(offer: &Offer, asset: &Asset, done: &AtomicU64, tx: &Sender<Msg>) -> Result<(), String> {
+fn run_install(offer: &Offer, asset: &Asset, done: &AtomicU64, tx: &Sender<Msg>, waker: &Option<Waker>) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let work = std::env::temp_dir().join(format!("layr-update-{}", offer.release.version));
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let archive = work.join(&asset.name);
-    let result = download(asset, &archive, done).and_then(|()| {
+    let result = download(asset, &archive, done, waker).and_then(|()| {
         let _ = tx.send(Msg::Installing);
+        wake(waker);
         apply(offer.method, &archive, &exe, &work)
     });
     // The setup runs after this process exits, so it has to stay.
@@ -733,6 +772,35 @@ mod tests {
         assert_eq!(detect_method(exe, "linux", "aarch64"), Method::Manual);
         assert_eq!(detect_method(exe, "freebsd", "x86_64"), Method::Manual);
         assert_eq!(detect_method(Path::new("C:/Apps/layr.exe"), "windows", "aarch64"), Method::Manual);
+    }
+
+    #[test]
+    fn a_download_counts_its_bytes_and_wakes_the_window_as_it_goes() {
+        // A body that arrives 10 KB at a time.
+        struct Slow(Vec<u8>, usize);
+        impl Read for Slow {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let n = (self.0.len() - self.1).min(10_000).min(buf.len());
+                buf[..n].copy_from_slice(&self.0[self.1..self.1 + n]);
+                self.1 += n;
+                Ok(n)
+            }
+        }
+        let data: Vec<u8> = (0..500_000u32).map(|i| (i % 251) as u8).collect();
+        let done = AtomicU64::new(0);
+        let wakes = std::cell::Cell::new(0);
+        let seen = std::cell::RefCell::new(Vec::new());
+        let mut out = Vec::new();
+        let (total, hash) = copy_counting(&mut Slow(data.clone(), 0), &mut out, data.len() as u64, &done, &|| {
+            wakes.set(wakes.get() + 1);
+            seen.borrow_mut().push(done.load(Ordering::Relaxed));
+        })
+        .unwrap();
+        assert_eq!((total, out.len()), (500_000, 500_000));
+        assert_eq!(hash, Sha256::digest(&data).to_vec());
+        // 50 reads of 1 % each: one wake per read, each with more bytes than the last.
+        assert_eq!(wakes.get(), 50);
+        assert!(seen.borrow().windows(2).all(|w| w[0] < w[1]));
     }
 
     #[test]

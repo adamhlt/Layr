@@ -61,6 +61,11 @@ fn main() {
     rune::run(AppSpec {
         min_size: Some((900.0, 600.0)),
         poll: Some(poll),
+        // Background work (update checks, downloads, stitching) wakes the idle window with it.
+        setup: Some(|s: &mut Editor, waker| {
+            s.updater.set_waker(waker.clone());
+            s.stitcher.set_waker(waker);
+        }),
         on_key: Some(ui::on_key),
         ..AppSpec::new("Layr", (1400.0, 900.0), init, ui::view)
     });

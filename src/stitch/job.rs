@@ -59,6 +59,8 @@ pub struct Stitcher {
     ready: Option<RgbaImage>,
     /// The multiple-file picker, while it is open on its own thread.
     picked: Option<Receiver<Vec<PathBuf>>>,
+    /// Wakes the idle window when a background thread has news.
+    waker: Option<rune::Waker>,
     /// A line for the status bar, taken by the window.
     pub notice: Option<String>,
 }
@@ -89,7 +91,21 @@ impl Stitcher {
             to_save: None,
             ready: None,
             picked: None,
+            waker: None,
             notice: None,
+        }
+    }
+
+    pub fn set_waker(&mut self, w: rune::Waker) {
+        self.waker = Some(w);
+    }
+
+    fn wake(&self) -> impl Fn() + Send + 'static {
+        let w = self.waker.clone();
+        move || {
+            if let Some(w) = &w {
+                w();
+            }
         }
     }
 
@@ -149,8 +165,10 @@ impl Stitcher {
         }
         let (tx, rx) = mpsc::channel();
         self.picked = Some(rx);
+        let wake = self.wake();
         std::thread::spawn(move || {
             let _ = tx.send(dialog().pick_files().unwrap_or_default());
+            wake();
         });
     }
 
@@ -190,13 +208,15 @@ impl Stitcher {
             // 200 megapixels: about 14 000 px square, and 800 MB of pixels to hold and write.
             Output::File => Options { max_side: 32_768, max_pixels: 200_000_000, crop },
         };
-        let progress = Arc::new(Progress::new());
+        let progress = Arc::new(Progress::with_waker(self.waker.clone()));
+        let wake = self.wake();
         let (tx, rx) = mpsc::channel();
         self.progress = Some(progress.clone());
         self.rx = Some(rx);
         self.stage = Stage::Running;
         std::thread::spawn(move || {
             let _ = tx.send(stitch_files(&paths, &opts, &progress));
+            wake();
         });
     }
 
