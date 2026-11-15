@@ -1,5 +1,7 @@
 //! Layr: annotate photos with boxes, hatched zones, wires, arrows, markers and captions,
 //! then export the result at full resolution.
+//!
+//! Copyright (C) 2026 Adam Henault. Free software under the GNU GPL v3 or later; see LICENSE.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod color;

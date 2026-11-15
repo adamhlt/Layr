@@ -10,6 +10,7 @@
 [![Release](https://img.shields.io/github/v/release/adamhlt/Layr?color=16171C)](https://github.com/adamhlt/Layr/releases/latest)
 ![Platforms](https://img.shields.io/badge/Windows%20·%20macOS%20·%20Linux-16171C)
 ![Rust](https://img.shields.io/badge/Rust-Rune%20UI-16171C?logo=rust)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-16171C)](LICENSE)
 
 </div>
 
@@ -80,4 +81,9 @@ cargo run --release
 - **Linux**: needs `libxkbcommon-dev` and `libwayland-dev`.
 - **Release**: pushing a `v*` tag builds all three platforms into one GitHub release.
 
-<div align="center"><sub>Built with <a href="https://github.com/anomalyco/rune">Rune</a> · Inter typeface under the SIL Open Font License</sub></div>
+## License
+
+Layr is free software under the [GNU General Public License v3.0](LICENSE) or any later version.
+The bundled Inter typeface is under the SIL Open Font License.
+
+<div align="center"><sub>Built with <a href="https://github.com/anomalyco/rune">Rune</a></sub></div>

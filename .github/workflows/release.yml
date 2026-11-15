@@ -61,15 +61,22 @@ jobs:
           cargo build --release --locked
           mkdir -p dist/pkg
           cp target/release/$APP.exe README.md dist/pkg/
+          cp LICENSE dist/pkg/LICENSE.txt
           cp assets/Inter-LICENSE.txt dist/pkg/
-          (cd dist/pkg && 7z a ../$APP-${{ matrix.name }}.zip .)
+          # A portable zip, and an installer built with Inno Setup.
+          (cd dist/pkg && 7z a ../$APP-${{ matrix.name }}-portable.zip .)
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          if [ ! -f "$ISCC" ]; then choco install innosetup --no-progress -y; fi
+          # MSYS_NO_PATHCONV keeps Git Bash from rewriting the /D switches as paths.
+          MSYS_NO_PATHCONV=1 "$ISCC" /DAppVersion=$VERSION /DSourceExe=../../target/release/$APP.exe /DOutputDir=../../dist packaging/windows/layr.iss
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
         run: |
           cargo build --release --locked
           mkdir -p dist/$APP
-          cp target/release/$APP README.md assets/Inter-LICENSE.txt dist/$APP/
+          cp target/release/$APP README.md LICENSE assets/Inter-LICENSE.txt dist/$APP/
           cp assets/icon/icon.png dist/$APP/layr.png
           cp packaging/linux/layr.desktop dist/$APP/
           tar -C dist -czf dist/$APP-${{ matrix.name }}.tar.gz $APP
@@ -86,17 +93,23 @@ jobs:
             target/aarch64-apple-darwin/release/$APP target/x86_64-apple-darwin/release/$APP
           VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           sed "s/__VERSION__/$VERSION/g" packaging/macos/Info.plist > "$APPDIR/Info.plist"
-          cp assets/Inter-LICENSE.txt "$APPDIR/Resources/"
+          cp LICENSE assets/Inter-LICENSE.txt "$APPDIR/Resources/"
           cp assets/icon/AppIcon.icns "$APPDIR/Resources/"
           # Ad-hoc signature so Apple silicon runs it; it is not notarized.
           codesign --force --deep --sign - "dist/Layr.app"
-          (cd dist && ditto -c -k --keepParent "Layr.app" $APP-${{ matrix.name }}.zip)
+          # A disk image with the app and a link to Applications to drag it onto.
+          mkdir -p dist/dmg
+          cp -R "dist/Layr.app" dist/dmg/
+          ln -s /Applications dist/dmg/Applications
+          hdiutil create -volname "Layr $VERSION" -srcfolder dist/dmg -ov -format UDZO dist/$APP-${{ matrix.name }}.dmg
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: |
             dist/*.zip
+            dist/*.exe
+            dist/*.dmg
             dist/*.tar.gz
           if-no-files-found: error
 
@@ -106,6 +119,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
+      # For the release notes in docs/releases/<tag>.md, when there are some.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -115,7 +130,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           ls -la dist
+          NOTES="docs/releases/$GITHUB_REF_NAME.md"
+          if [ -f "$NOTES" ]; then NOTE_ARGS=(--notes-file "$NOTES"); else NOTE_ARGS=(--generate-notes); fi
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "Layr $GITHUB_REF_NAME" \
-            --generate-notes
+            "${NOTE_ARGS[@]}"
