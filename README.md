@@ -17,22 +17,38 @@
 ---
 
 Layr is a native desktop editor for drawing boxes, badges, wires, arrows, measures and captions
-over photos, then exporting the result in full resolution. It's made for repair notes, technical
-documentation and annotated screenshots.
+over photos, then exporting the result in full resolution. It can also stitch overlapping photos
+into one large image first. It's made for repair notes, technical documentation and annotated
+screenshots.
 
-<p align="center"><img src="docs/before-after.jpg" alt="An Intel 8086 die photo, before and after annotating it in Layr"></p>
-<p align="center"><sub>Siemens SAB 8086 die (an Intel 8086 made under licence) by <a href="https://commons.wikimedia.org/wiki/File:Siemens_SAB_8086_die.JPG">Pauli Rautakorpi</a>, <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>, resized and annotated. Block positions from Ken Shirriff's <a href="https://www.righto.com/2020/06/a-look-at-die-of-8086-processor.html">look at the 8086 die</a>.</sub></p>
+<p align="center"><img src="docs/screenshot.jpg" alt="Layr with an Intel 8086 die photo annotated with boxes, hatching, numbered badges and a legend"></p>
 
 ## Features
 
+**Annotate**
 - Boxes, hatched areas, wires, arrows, dots and captions
-- Auto-numbered badges in five shapes
-- Real-world measures from a one-time scale
-- One-click legend
-- Custom fonts and colours, with opacity
-- Export to PNG, JPEG, WebP or PDF (vector shapes and selectable text)
+- Numbered badges that count up by themselves, in five shapes
+- Real-world measures from a scale you set once
+- A legend built in one click from the styles on the image
+- Any installed font, colours with opacity, a palette saved between sessions
 - Undo, copy and paste, crisp at any zoom
-- Stitch overlapping photos into one large image (any order, turned or tilted), then annotate it
+
+**Stitch**
+- Join overlapping photos into one large image: a die under a microscope, a board, a page, a wall
+- In any order, turned or taken at an angle: Layr finds what they have in common
+- Seamless, without ghosting, blended band by band with brightness matched between photos
+- Cropped to a clean rectangle, opened to annotate or saved at full size (up to 200 megapixels)
+
+**Export**
+- PNG, JPEG, WebP or PDF, with vector shapes and selectable text in PDFs
+- The whole image, an area you select, or without the empty edges of a mosaic
+- Scaled from 25 % to 200 %, with or without the photo underneath
+
+**Open** (`Ctrl+O`) one image, or a list of photos to stitch: pick several at once, add a folder,
+or drop them on the window.
+
+<p align="center"><img src="docs/before-after.jpg" alt="An Intel 8086 die photo, before and after annotating it in Layr"></p>
+<p align="center"><sub>Siemens SAB 8086 die (an Intel 8086 made under licence) by <a href="https://commons.wikimedia.org/wiki/File:Siemens_SAB_8086_die.JPG">Pauli Rautakorpi</a>, <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>, resized and annotated. Block positions from Ken Shirriff's <a href="https://www.righto.com/2020/06/a-look-at-die-of-8086-processor.html">look at the 8086 die</a>.</sub></p>
 
 ## Shortcuts
 
@@ -42,10 +58,11 @@ documentation and annotated screenshots.
 | `G` | Add a legend |
 | `Ctrl+C` / `Ctrl+V` · `Ctrl+D` | Copy and paste · duplicate |
 | `Ctrl+Z` / `Ctrl+Y` | Undo and redo |
-| `Ctrl+O` · `Ctrl+E` | Open an image · export |
+| `Ctrl+O` · `Ctrl+E` | Open an image or photos to stitch · export |
 | `Ctrl+F` · wheel | Fit to window · zoom |
 | `Space` + drag, middle or right button | Pan the view |
 | `Shift` | Square boxes, lines at 45° |
+| `Enter` / `Esc` | Use or cancel the area being selected for export |
 
 ## Download
 
