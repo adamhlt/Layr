@@ -26,6 +26,8 @@ sha2 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
 tar = { version = "0.4", default-features = false }
+# Picking several images at once (Rune's dialogs pick one file).
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 [build-dependencies]
 winresource = "0.1"

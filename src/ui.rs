@@ -14,6 +14,7 @@ use crate::editor::{Editor, Hover, PanelTab, Tool};
 use crate::measure::Unit;
 use crate::model::{Annotation, BadgeShape, Hatch, Kind, PALETTE, Rgba, Shape as Geo, Style};
 use crate::render::{ExportOptions, Format};
+use crate::stitch::job::{self as stitching, Mode, Output, Stage};
 use crate::update::{self, State};
 use crate::{cursors, font, vector};
 
@@ -22,6 +23,8 @@ const PANEL_W: f32 = 290.0;
 const RAIL_W: f32 = 168.0;
 /// The colour editor's inner width.
 const PICKER_W: f32 = 300.0;
+/// The stitching dialog's inner width.
+const STITCH_W: f32 = 360.0;
 
 fn theme() -> tok::Theme {
     tok::theme(true)
@@ -41,7 +44,9 @@ fn button(key: impl Into<String>, label: &str, active: bool, enabled: bool, acce
         .radius(6.0)
         .fill(if active { accent } else { t.control_track })
         .child(text(label).font(type_::LABEL).color(if enabled { t.text } else { t.text_secondary.alpha(0.5) }));
-    if enabled { b.focusable(true).hover(t.hover).cursor(Cursor::Pointer) } else { b.disabled(true) }
+    // `disabled` only tells assistive tech; `inert` is what stops the press, which would
+    // otherwise set state that takes effect once the action becomes available.
+    if enabled { b.focusable(true).hover(t.hover).cursor(Cursor::Pointer) } else { b.disabled(true).inert() }
 }
 
 fn section(title: &str) -> El {
@@ -199,12 +204,32 @@ fn percent(a: u8) -> f32 {
 
 // ---- Rail -------------------------------------------------------------------------------------
 
-fn open_dialog(_: &mut Editor, tx: &mut Tx) {
+/// The open menu's single-image choice: picks the file, opens it and closes the menu.
+fn choose_image(_: &mut Editor, tx: &mut Tx) {
     let options = FileDialogOptions { title: "Open an image".into(), ..Default::default() }.filter("Images", &IMAGE_EXTENSIONS);
     tx.open_file(options, |s: &mut Editor, result, _| match result {
-        Ok(Some(path)) => s.load(&path),
+        Ok(Some(path)) => {
+            s.stitcher.close();
+            s.load(&path);
+        }
         Ok(None) => {}
         Err(e) => s.status = format!("Open dialog unavailable: {e}"),
+    });
+}
+
+/// Adds every image in a folder to the list of photos to stitch.
+fn add_folder(_: &mut Editor, tx: &mut Tx) {
+    let options = FileDialogOptions { title: "Add the images of a folder".into(), ..Default::default() };
+    tx.open_folder(options, |s: &mut Editor, result, _| match result {
+        Ok(Some(dir)) => {
+            let images = stitching::images_in(&dir);
+            if images.is_empty() {
+                s.status = format!("No images in {}", dir.display());
+            }
+            s.stitcher.add(images);
+        }
+        Ok(None) => {}
+        Err(e) => s.status = format!("Folder dialog unavailable: {e}"),
     });
 }
 
@@ -322,7 +347,9 @@ fn rail_button(key: impl Into<String>, icon: Option<El>, label: &str, hint: &str
     if !hint.is_empty() {
         b = b.child(text(hint).font(type_::LABEL).color(if active { Color::WHITE.alpha(0.7) } else { t.text_secondary }));
     }
-    if enabled { b.focusable(true).hover(t.hover).cursor(Cursor::Pointer) } else { b.disabled(true) }
+    // `disabled` only tells assistive tech; `inert` is what stops the press, which would
+    // otherwise set state that takes effect once the action becomes available.
+    if enabled { b.focusable(true).hover(t.hover).cursor(Cursor::Pointer) } else { b.disabled(true).inert() }
 }
 
 fn rail(s: &Editor, accent: Color) -> El {
@@ -359,7 +386,7 @@ fn rail(s: &Editor, accent: Color) -> El {
         .padding(8.0)
         .gap(2.0)
         .fill(t.card)
-        .child(rail_button("open", None, "Open…", "Ctrl+O", false, true, accent).on_press_tx(open_dialog))
+        .child(rail_button("open", None, "Open…", "Ctrl+O", false, true, accent).on_press(|s: &mut Editor| s.stitcher.open()))
         .child(rail_button("export", None, "Export…", "Ctrl+E", false, has, accent).on_press(|s: &mut Editor| s.export_open = true))
         .child(sep())
         .child(tools)
@@ -490,7 +517,7 @@ fn viewport(s: &Editor, accent: Color) -> El {
                     .items_center()
                     .child(text("No image").font(TextStyle::new(20.0, 600.0)).color(t.text))
                     .child(text("Drop an image here, or open one (PNG, JPEG, WebP, BMP).").font(type_::BODY).color(t.text_secondary))
-                    .child(button("open-empty", "Open an image…", true, true, accent).on_press_tx(open_dialog)),
+                    .child(button("open-empty", "Open an image…", true, true, accent).on_press(|s: &mut Editor| s.stitcher.open())),
             );
         }
     }
@@ -1016,6 +1043,149 @@ fn export_view(s: &Editor, accent: Color) -> El {
         .child(card.modal(true, |s: &mut Editor| s.export_open = false))
 }
 
+fn stitch_view(s: &Editor, accent: Color) -> El {
+    let t = theme();
+    let st = &s.stitcher;
+    let mut card = col()
+        .key("stitch-dialog")
+        .w(STITCH_W + 32.0)
+        .padding(16.0)
+        .gap(12.0)
+        .radius(12.0)
+        .fill(t.card)
+        .border(1.0, t.card_border)
+        .shadow(12.0, 40.0, Color::BLACK.alpha(0.5))
+        .child(
+            text(if st.mode == Mode::Stitch && st.stage != Stage::Setup { "Stitch images" } else { "Open" })
+                .font(TextStyle::new(15.0, 600.0))
+                .color(t.text),
+        );
+    match &st.stage {
+        Stage::Setup => {
+            let modes = [(Mode::Single, "One image".to_string()), (Mode::Stitch, "Stitch several".to_string())];
+            card = card.child(segmented("open-mode", &modes, st.mode, accent, |s, m| s.stitcher.mode = m));
+            if st.mode == Mode::Single {
+                card = card
+                    .child(text("Open one image to annotate. You can also drop it here.").font(type_::LABEL).color(t.text_secondary).wrap())
+                    .child(
+                        row()
+                            .w_full()
+                            .gap(8.0)
+                            .child(spacer())
+                            .child(button("stitch-cancel", "Cancel", false, true, accent).on_press(|s: &mut Editor| s.stitcher.close()))
+                            .child(button("open-choose", "Choose an image…", true, true, accent).on_press_tx(choose_image)),
+                    );
+            } else {
+                let shown = 8;
+                let mut list = col().w_full().gap(4.0);
+                for (i, p) in st.paths.iter().take(shown).enumerate() {
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    list = list.child(
+                        row()
+                            .w_full()
+                            .gap(8.0)
+                            .items_center()
+                            .child(el().grow(1.0).min_w(0.0).child(text(name).font(type_::LABEL).color(t.text).truncate()))
+                            .child(
+                                button(format!("stitch-rm-{i}"), "×", false, true, accent)
+                                    .on_press(move |s: &mut Editor| s.stitcher.remove(i)),
+                            ),
+                    );
+                }
+                let hidden = st.paths.len().saturating_sub(shown);
+                if hidden > 0 {
+                    list = list.child(text(format!("and {hidden} more")).font(type_::LABEL).color(t.text_secondary));
+                }
+                let summary = match st.paths.len() {
+                    0 => "No images yet. Add two or more, or drop them here.".to_string(),
+                    1 => "1 image. Add at least one more.".to_string(),
+                    n => format!("{n} images"),
+                };
+                let note = match st.output {
+                    Output::Editor => "Opens in the editor, up to 8192 px a side, ready to annotate.".to_string(),
+                    Output::File => "As large as the photos allow (up to 200 megapixels), saved as PNG or WebP.".to_string(),
+                };
+                let outputs = [(Output::Editor, "Open in Layr".to_string()), (Output::File, "Save to a file".to_string())];
+                card = card
+                    .child(text("Photos are joined by what they have in common, in any order, turned or taken at an angle. Each should share about a third of its view with another.").font(type_::LABEL).color(t.text_secondary).wrap())
+                    .child(section("Images"))
+                    .child(text(summary).font(type_::LABEL).color(t.text_secondary))
+                    .child(list)
+                    .child(
+                        row()
+                            .w_full()
+                            .gap(8.0)
+                            .child(button("stitch-add", "Add images…", false, !st.picking(), accent).on_press(|s: &mut Editor| s.stitcher.pick_images()))
+                            .child(button("stitch-folder", "Add a folder…", false, true, accent).on_press_tx(add_folder))
+                            .child(spacer())
+                            .child(button("stitch-clear", "Clear", false, !st.paths.is_empty(), accent).on_press(|s: &mut Editor| s.stitcher.paths.clear())),
+                    )
+                    .child(section("Result"))
+                    .child(segmented("stitch-output", &outputs, st.output, accent, |s, o| s.stitcher.output = o))
+                    .child(text(note).font(type_::LABEL).color(t.text_secondary).wrap())
+                    .child(check("stitch-crop", "Crop to a rectangle", st.crop).on_press(|s: &mut Editor| s.stitcher.crop = !s.stitcher.crop))
+                    .child(
+                        text(if st.crop {
+                            "Keeps the largest rectangle the photos fill, without the ragged edges of the assembly."
+                        } else {
+                            "Keeps everything; the area no photo covers stays transparent."
+                        })
+                        .font(type_::LABEL)
+                        .color(t.text_secondary)
+                        .wrap(),
+                    )
+                    .child(
+                        row()
+                            .w_full()
+                            .gap(8.0)
+                            .child(spacer())
+                            .child(button("stitch-cancel", "Cancel", false, true, accent).on_press(|s: &mut Editor| s.stitcher.close()))
+                            .child(button("stitch-go", "Stitch", true, st.can_start(), accent).on_press(|s: &mut Editor| s.stitcher.start())),
+                    );
+            }
+        }
+        Stage::Running => {
+            let (stage, frac) = st.status().unwrap_or_default();
+            card = card
+                .child(text(if stage.is_empty() { "Starting…".to_string() } else { format!("{stage}…") }).font(type_::LABEL).color(t.text))
+                .child(
+                    el().key("stitch-bar")
+                        .w(STITCH_W)
+                        .h(6.0)
+                        .child(el().absolute(0.0, 0.0).size(STITCH_W, 6.0).radius(3.0).fill(t.control_track).inert())
+                        .child(el().absolute(0.0, 0.0).size((frac * STITCH_W).max(6.0), 6.0).radius(3.0).fill(accent).inert()),
+                )
+                .child(
+                    row()
+                        .w_full()
+                        .child(spacer())
+                        .child(button("stitch-stop", "Cancel", false, true, accent).on_press(|s: &mut Editor| s.stitcher.close())),
+                );
+        }
+        Stage::Failed(e) => {
+            card = card.child(text(e.clone()).font(type_::LABEL).color(t.text).wrap()).child(
+                row()
+                    .w_full()
+                    .child(spacer())
+                    .child(button("stitch-close", "Close", true, true, accent).on_press(|s: &mut Editor| s.stitcher.close())),
+            );
+        }
+        Stage::Idle => {}
+    }
+    el().key("stitch-scrim")
+        .absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .fill(Color::BLACK.alpha(0.45))
+        .center()
+        // While a modal is open only it takes drops, so the menu itself does.
+        .child(
+            card.on_drop_files(|s: &mut Editor, files, _| drop_files(s, files))
+                .accepts_extensions(&IMAGE_EXTENSIONS)
+                .modal(true, |s: &mut Editor| s.stitcher.close()),
+        )
+}
+
 fn properties(s: &Editor, accent: Color) -> El {
     let t = theme();
     let Some(a) = s.selection() else {
@@ -1218,6 +1388,22 @@ fn update_banner(s: &Editor, accent: Color) -> Option<El> {
 
 // ---- Window -----------------------------------------------------------------------------------
 
+/// Files dropped on the window: one image opens; several are photos to stitch, which join the
+/// open menu's list when it is showing.
+fn drop_files(s: &mut Editor, files: &[std::path::PathBuf]) {
+    let images: Vec<_> = files.iter().filter(|f| stitching::is_image(f)).cloned().collect();
+    let menu = s.stitcher.stage == Stage::Setup;
+    if menu && (images.len() >= 2 || s.stitcher.mode == Mode::Stitch) {
+        s.stitcher.mode = Mode::Stitch;
+        s.stitcher.add(images);
+    } else if images.len() >= 2 {
+        s.stitcher.begin(images);
+    } else if let Some(f) = files.first() {
+        s.stitcher.close();
+        s.load(f);
+    }
+}
+
 pub fn view(s: &Editor, cx: &mut Cx<Editor>) -> El {
     // Panels, toggles and dialogs change in place, without springs or slides.
     cx.reduced_motion(true);
@@ -1256,11 +1442,7 @@ pub fn view(s: &Editor, cx: &mut Cx<Editor>) -> El {
         .h_full()
         .fill(t.bg)
         .instant_changes()
-        .on_drop_files(|s: &mut Editor, files, _| {
-            if let Some(f) = files.first() {
-                s.load(f);
-            }
-        })
+        .on_drop_files(|s: &mut Editor, files, _| drop_files(s, files))
         .accepts_extensions(&IMAGE_EXTENSIONS)
         .on_key_up(|s: &mut Editor, e: &KeyEvent, _| {
             let space = e.key == Key::Text(" ".into());
@@ -1288,6 +1470,9 @@ pub fn view(s: &Editor, cx: &mut Cx<Editor>) -> El {
     if s.export_open && s.picture.is_some() {
         root = root.child(export_view(s, accent));
     }
+    if s.stitcher.is_open() {
+        root = root.child(stitch_view(s, accent));
+    }
     root
 }
 
@@ -1309,13 +1494,15 @@ pub fn on_key(s: &mut Editor, e: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Escape if s.color_tool.is_some() => s.color_tool = None,
         Key::Enter if s.color_tool.is_some() => s.apply_color_tool(),
         Key::Escape if s.font_menu => s.font_menu = false,
+        Key::Escape if s.stitcher.is_open() => s.stitcher.close(),
+        Key::Enter if s.stitcher.can_start() => s.stitcher.start(),
         Key::Escape if s.export_open => s.export_open = false,
         Key::Enter if s.export_open => export_dialog(s, tx),
         Key::Command(c) => match c {
             'z' if shift => s.redo(),
             'z' => s.undo(),
             'y' => s.redo(),
-            'o' => open_dialog(s, tx),
+            'o' => s.stitcher.open(),
             'e' | 's' if s.picture.is_some() => s.export_open = true,
             'c' => s.copy(),
             'v' => s.paste(None),
@@ -1329,7 +1516,7 @@ pub fn on_key(s: &mut Editor, e: &KeyEvent, tx: &mut Tx) -> bool {
             _ => return false,
         },
         Key::Escape if typing => tx.blur(),
-        _ if typing || s.color_tool.is_some() || s.export_open => return false,
+        _ if typing || s.color_tool.is_some() || s.export_open || s.stitcher.is_open() => return false,
         Key::Delete | Key::Backspace => s.delete_selected(),
         Key::Escape => s.escape(),
         Key::Enter => s.finish_wire(),

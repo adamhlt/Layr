@@ -154,6 +154,7 @@ pub struct Editor {
 
     pub status: String,
     pub updater: crate::update::Updater,
+    pub stitcher: crate::stitch::job::Stitcher,
 }
 
 impl Editor {
@@ -201,6 +202,7 @@ impl Editor {
             font_query: TextEdit::new(""),
             status: "Open an image (Ctrl+O) or drop one on the window.".into(),
             updater: crate::update::Updater::new(),
+            stitcher: crate::stitch::job::Stitcher::new(),
         }
     }
 
@@ -208,28 +210,35 @@ impl Editor {
 
     pub fn load(&mut self, path: &Path) {
         match image::open(path) {
-            Ok(img) => {
-                let rgba = img.to_rgba8();
-                let (w, h) = rgba.dimensions();
-                if w > 8192 || h > 8192 {
-                    self.status = format!("Image too large ({w}×{h}): 8192 px per side at most.");
-                    return;
-                }
-                self.base.set(w, h, rgba.as_raw().clone());
-                self.picture = Some(Picture { path: path.to_path_buf(), rgba });
-                self.anns.clear();
-                self.undo.clear();
-                self.redo.clear();
-                self.selected = None;
-                self.drawing_wire = None;
-                self.next_id = 1;
-                self.dirty = true;
-                self.fit_pending = true;
-                self.fit();
-                self.status = format!("{} — {w}×{h} px", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-            }
+            Ok(img) => self.set_picture(path.to_path_buf(), img.to_rgba8()),
             Err(e) => self.status = format!("Couldn't open {}: {e}", path.display()),
         }
+    }
+
+    /// Opens a stitched mosaic. It has no file yet: `name` only gives the export its name.
+    pub fn load_mosaic(&mut self, rgba: image::RgbaImage) {
+        self.set_picture(PathBuf::from("mosaic.png"), rgba);
+    }
+
+    fn set_picture(&mut self, path: PathBuf, rgba: image::RgbaImage) {
+        let (w, h) = rgba.dimensions();
+        if w > 8192 || h > 8192 {
+            self.status = format!("Image too large ({w}×{h}): 8192 px per side at most.");
+            return;
+        }
+        self.base.set(w, h, rgba.as_raw().clone());
+        self.status = format!("{} — {w}×{h} px", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        self.picture = Some(Picture { path, rgba });
+        self.export_open = false;
+        self.anns.clear();
+        self.undo.clear();
+        self.redo.clear();
+        self.selected = None;
+        self.drawing_wire = None;
+        self.next_id = 1;
+        self.dirty = true;
+        self.fit_pending = true;
+        self.fit();
     }
 
     pub fn export(&mut self, path: &Path) {

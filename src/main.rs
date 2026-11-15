@@ -14,6 +14,7 @@ mod model;
 mod mouse;
 mod pdf;
 mod render;
+mod stitch;
 mod ui;
 mod update;
 mod vector;
@@ -38,7 +39,14 @@ fn poll(s: &mut Editor, _: f64, tx: &mut rune::Tx) -> bool {
     if let Some(note) = s.updater.notice.take() {
         s.status = note;
     }
-    s.refresh() | updated
+    let stitching = s.stitcher.poll(tx);
+    if let Some(mosaic) = s.stitcher.take_ready() {
+        s.load_mosaic(mosaic);
+    }
+    if let Some(note) = s.stitcher.notice.take() {
+        s.status = note;
+    }
+    s.refresh() | updated | stitching
 }
 
 fn main() {

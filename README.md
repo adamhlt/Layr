@@ -32,6 +32,7 @@ documentation and annotated screenshots.
 - Custom fonts and colours, with opacity
 - Export to PNG, JPEG, WebP or PDF (vector shapes and selectable text)
 - Undo, copy and paste, crisp at any zoom
+- Stitch overlapping photos into one large image (any order, turned or tilted), then annotate it
 
 ## Shortcuts
 
