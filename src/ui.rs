@@ -1043,6 +1043,27 @@ fn export_view(s: &Editor, accent: Color) -> El {
         .child(card.modal(true, |s: &mut Editor| s.export_open = false))
 }
 
+/// A dashed area of the open menu that takes dropped files, lit while a drag is over it, with
+/// the buttons that pick files the other way.
+fn drop_zone(over: bool, title: &str, buttons: El, accent: Color) -> El {
+    let t = theme();
+    col()
+        .key("drop-zone")
+        .w_full()
+        .padding(18.0)
+        .gap(12.0)
+        .items_center()
+        .radius(8.0)
+        .fill(if over { accent.alpha(0.15) } else { Color::TRANSPARENT })
+        .border(1.5, if over { accent } else { t.text_secondary.alpha(0.5) })
+        .border_dash(6.0, 4.0)
+        .child(text(title).font(TextStyle::new(14.0, 600.0)).color(if over { t.text } else { t.text_secondary }))
+        .child(buttons)
+        .on_drop_files(|s: &mut Editor, files, _| drop_files(s, files))
+        .accepts_extensions(&IMAGE_EXTENSIONS)
+        .on_drop_hover(|s: &mut Editor, over, _| s.stitcher.drop_over = over)
+}
+
 fn stitch_view(s: &Editor, accent: Color) -> El {
     let t = theme();
     let st = &s.stitcher;
@@ -1065,16 +1086,19 @@ fn stitch_view(s: &Editor, accent: Color) -> El {
             let modes = [(Mode::Single, "One image".to_string()), (Mode::Stitch, "Stitch several".to_string())];
             card = card.child(segmented("open-mode", &modes, st.mode, accent, |s, m| s.stitcher.mode = m));
             if st.mode == Mode::Single {
-                card = card
-                    .child(text("Open one image to annotate. You can also drop it here.").font(type_::LABEL).color(t.text_secondary).wrap())
-                    .child(
-                        row()
-                            .w_full()
-                            .gap(8.0)
-                            .child(spacer())
-                            .child(button("stitch-cancel", "Cancel", false, true, accent).on_press(|s: &mut Editor| s.stitcher.close()))
-                            .child(button("open-choose", "Choose an image…", true, true, accent).on_press_tx(choose_image)),
-                    );
+                card =
+                    card.child(text("Open one image to annotate.").font(type_::LABEL).color(t.text_secondary).wrap())
+                        .child(drop_zone(
+                            st.drop_over,
+                            "Drop an image here",
+                            row().gap(8.0).child(button("open-choose", "Choose an image…", true, true, accent).on_press_tx(choose_image)),
+                            accent,
+                        ))
+                        .child(
+                            row().w_full().gap(8.0).child(spacer()).child(
+                                button("stitch-cancel", "Cancel", false, true, accent).on_press(|s: &mut Editor| s.stitcher.close()),
+                            ),
+                        );
             } else {
                 let shown = 8;
                 let mut list = col().w_full().gap(4.0);
@@ -1097,7 +1121,7 @@ fn stitch_view(s: &Editor, accent: Color) -> El {
                     list = list.child(text(format!("and {hidden} more")).font(type_::LABEL).color(t.text_secondary));
                 }
                 let summary = match st.paths.len() {
-                    0 => "No images yet. Add two or more, or drop them here.".to_string(),
+                    0 => "No images yet: add two or more.".to_string(),
                     1 => "1 image. Add at least one more.".to_string(),
                     n => format!("{n} images"),
                 };
@@ -1109,17 +1133,24 @@ fn stitch_view(s: &Editor, accent: Color) -> El {
                 card = card
                     .child(text("Photos are joined by what they have in common, in any order, turned or taken at an angle. Each should share about a third of its view with another.").font(type_::LABEL).color(t.text_secondary).wrap())
                     .child(section("Images"))
-                    .child(text(summary).font(type_::LABEL).color(t.text_secondary))
-                    .child(list)
+                    .child(drop_zone(
+                        st.drop_over,
+                        "Drop photos here",
+                        row()
+                            .gap(8.0)
+                            .child(button("stitch-add", "Add images…", false, !st.picking(), accent).on_press(|s: &mut Editor| s.stitcher.pick_images()))
+                            .child(button("stitch-folder", "Add a folder…", false, true, accent).on_press_tx(add_folder)),
+                        accent,
+                    ))
                     .child(
                         row()
                             .w_full()
-                            .gap(8.0)
-                            .child(button("stitch-add", "Add images…", false, !st.picking(), accent).on_press(|s: &mut Editor| s.stitcher.pick_images()))
-                            .child(button("stitch-folder", "Add a folder…", false, true, accent).on_press_tx(add_folder))
+                            .items_center()
+                            .child(text(summary).font(type_::LABEL).color(t.text_secondary))
                             .child(spacer())
                             .child(button("stitch-clear", "Clear", false, !st.paths.is_empty(), accent).on_press(|s: &mut Editor| s.stitcher.paths.clear())),
                     )
+                    .child(list)
                     .child(section("Result"))
                     .child(segmented("stitch-output", &outputs, st.output, accent, |s, o| s.stitcher.output = o))
                     .child(text(note).font(type_::LABEL).color(t.text_secondary).wrap())

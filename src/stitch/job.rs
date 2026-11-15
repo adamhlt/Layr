@@ -49,6 +49,8 @@ pub struct Stitcher {
     pub mode: Mode,
     /// Trim the mosaic to a rectangle.
     pub crop: bool,
+    /// Files are being dragged over the menu's drop zone.
+    pub drop_over: bool,
     progress: Option<Arc<Progress>>,
     rx: Option<Receiver<Result<super::Mosaic, String>>>,
     /// A finished mosaic waiting for the user to name its file.
@@ -81,6 +83,7 @@ impl Stitcher {
             output: Output::Editor,
             mode: Mode::Single,
             crop: true,
+            drop_over: false,
             progress: None,
             rx: None,
             to_save: None,
@@ -106,6 +109,7 @@ impl Stitcher {
         self.paths.clear();
         self.mode = Mode::Single;
         self.stage = Stage::Setup;
+        self.drop_over = false;
     }
 
     /// Opens the menu on stitching these images (they were dropped on the window).
@@ -116,6 +120,7 @@ impl Stitcher {
         self.paths.clear();
         self.mode = Mode::Stitch;
         self.stage = Stage::Setup;
+        self.drop_over = false;
         self.add(paths);
     }
 
