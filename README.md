@@ -25,31 +25,13 @@ documentation and annotated screenshots.
 
 ## Features
 
-**Annotate**
-- Rectangles, hatched areas, wires, arrows, dots and multi-line captions
-- Numbered badges that count up by themselves: circle, rounded, square, diamond or hexagon
-- Move, resize and restyle anything, with undo, copy and paste
-
-**Measure**
-- Draw a line over something of known length and set the scale once
-- Every measure then shows its real length, in µm, mm, cm, m or inches
-- Boxes can show their real width and height
-
-**Explain**
-- One click builds a legend with a sample of each style used on the image
-- Write what each style means; updating the legend keeps your text
-
-**Style**
-- Any installed font, bold, any size
-- A colour editor that takes hex, `rgb()`, `hsl()` or HTML names, with opacity
-- Random flat colours to grow a palette that's saved between sessions
-
-**Export**
-- PNG, JPEG (adjustable quality), lossless WebP, or PDF
-- Scale from 25 % to 200 %, with or without the photo underneath
-- In PDFs, shapes stay vectors and text can be selected, searched and copied
-
-The canvas draws annotations as vectors, so they stay crisp at any zoom.
+- Boxes, hatched areas, wires, arrows, dots and captions
+- Auto-numbered badges in five shapes
+- Real-world measures from a one-time scale
+- One-click legend
+- Custom fonts and colours, with opacity
+- Export to PNG, JPEG, WebP or PDF (vector shapes and selectable text)
+- Undo, copy and paste, crisp at any zoom
 
 ## Shortcuts
 
