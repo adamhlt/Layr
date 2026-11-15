@@ -288,6 +288,16 @@ impl Format {
     }
 }
 
+/// Which part of the image is exported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Area {
+    Whole,
+    /// The largest rectangle without transparent pixels: no empty edges.
+    Filled,
+    /// A rectangle the user drew.
+    Custom,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExportOptions {
     pub format: Format,
@@ -299,11 +309,14 @@ pub struct ExportOptions {
     pub photo: bool,
     /// PNG: compress harder for a smaller file.
     pub small_png: bool,
+    pub area: Area,
+    /// The area the user drew, `[x, y, w, h]` in image pixels.
+    pub custom: Option<[f32; 4]>,
 }
 
 impl Default for ExportOptions {
     fn default() -> ExportOptions {
-        ExportOptions { format: Format::Png, quality: 92, scale: 1.0, photo: true, small_png: false }
+        ExportOptions { format: Format::Png, quality: 92, scale: 1.0, photo: true, small_png: false, area: Area::Whole, custom: None }
     }
 }
 
@@ -342,9 +355,38 @@ pub fn composite(base: &image::RgbaImage, anns: &[Annotation], scale: &Scale, op
     Ok(out)
 }
 
-/// Writes the annotated image to `path` as `opts` asks.
-pub fn export(base: &image::RgbaImage, anns: &[Annotation], scale: &Scale, opts: &ExportOptions, path: &Path) -> Result<(), String> {
+/// `[x, y, w, h]` cut to whole pixels inside a `w × h` image; the whole image when nothing is
+/// left.
+pub fn clamp_rect(r: [f32; 4], (w, h): (u32, u32)) -> [u32; 4] {
+    let x0 = r[0].round().clamp(0.0, w as f32) as u32;
+    let y0 = r[1].round().clamp(0.0, h as f32) as u32;
+    let x1 = (r[0] + r[2]).round().clamp(0.0, w as f32) as u32;
+    let y1 = (r[1] + r[3]).round().clamp(0.0, h as f32) as u32;
+    if x1 > x0 && y1 > y0 { [x0, y0, x1 - x0, y1 - y0] } else { [0, 0, w, h] }
+}
+
+/// Writes the part `rect` (`[x, y, w, h]`, image pixels) of the annotated image to `path` as
+/// `opts` asks.
+pub fn export(
+    base: &image::RgbaImage,
+    anns: &[Annotation],
+    scale: &Scale,
+    opts: &ExportOptions,
+    rect: [u32; 4],
+    path: &Path,
+) -> Result<(), String> {
     use image::ImageEncoder;
+    // A crop is the cut photo with the annotations shifted onto it; what hangs over the edge
+    // is clipped by the smaller canvas.
+    let [x, y, cw, ch] = clamp_rect(rect.map(|v| v as f32), base.dimensions());
+    let (cut, shifted);
+    let (base, anns) = if [x, y, cw, ch] == [0, 0, base.width(), base.height()] {
+        (base, anns)
+    } else {
+        cut = image::imageops::crop_imm(base, x, y, cw, ch).to_image();
+        shifted = anns.iter().map(|a| Annotation { shape: a.translated(-(x as f32), -(y as f32)), ..a.clone() }).collect::<Vec<_>>();
+        (&cut, shifted.as_slice())
+    };
     if opts.format == Format::Pdf {
         return crate::pdf::export(base, anns, scale, opts, path);
     }
@@ -386,10 +428,23 @@ mod tests {
             legend: Vec::new(),
         };
         let path = std::env::temp_dir().join("layr-export-test.png");
-        export(&base, &[a], &Scale::default(), &ExportOptions::default(), &path).unwrap();
+        export(&base, std::slice::from_ref(&a), &Scale::default(), &ExportOptions::default(), [0, 0, 64, 64], &path).unwrap();
         let out = image::open(&path).unwrap().to_rgba8();
         assert_eq!(out.get_pixel(60, 60).0, [10, 20, 30, 255], "outside stays the photo");
         assert_ne!(out.get_pixel(28, 40).0, [10, 20, 30, 255], "inside is tinted");
+        // A crop keeps only its part, with the annotations moved along.
+        export(&base, &[a], &Scale::default(), &ExportOptions::default(), [20, 30, 40, 30], &path).unwrap();
+        let cut = image::open(&path).unwrap().to_rgba8();
+        assert_eq!(cut.dimensions(), (40, 30));
+        assert_eq!(out.get_pixel(28, 40), cut.get_pixel(8, 10), "the same spot, moved by the crop");
+        assert_eq!(out.get_pixel(59, 59), cut.get_pixel(39, 29));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rects_are_cut_to_the_image() {
+        assert_eq!(clamp_rect([-5.0, 10.4, 50.0, 200.0], (100, 80)), [0, 10, 45, 70]);
+        assert_eq!(clamp_rect([90.0, 0.0, 30.0, 10.0], (100, 80)), [90, 0, 10, 10]);
+        assert_eq!(clamp_rect([120.0, 0.0, 30.0, 10.0], (100, 80)), [0, 0, 100, 80], "nothing left");
     }
 }

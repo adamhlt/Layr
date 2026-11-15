@@ -10,10 +10,10 @@ use rune::{
 };
 
 use crate::color::{self, ColorTool, Target};
-use crate::editor::{Editor, Hover, PanelTab, Tool};
+use crate::editor::{Editor, Hover, PanelTab, Tool, crop_handles};
 use crate::measure::Unit;
 use crate::model::{Annotation, BadgeShape, Hatch, Kind, PALETTE, Rgba, Shape as Geo, Style};
-use crate::render::{ExportOptions, Format};
+use crate::render::{Area, ExportOptions, Format};
 use crate::stitch::job::{self as stitching, Mode, Output, Stage};
 use crate::update::{self, State};
 use crate::{cursors, font, vector};
@@ -440,7 +440,92 @@ fn selection_overlay(s: &Editor, accent: Color) -> Vec<El> {
     out
 }
 
+/// The export area being chosen: the rest of the image dimmed, the area's outline and
+/// handles, its size, and a bar to finish.
+fn crop_overlay(s: &Editor, accent: Color) -> Vec<El> {
+    let t = theme();
+    let [_, _, vw, vh] = s.viewport;
+    let dim = Color::BLACK.alpha(0.6);
+    let mut out = Vec::new();
+    match s.export.custom {
+        None => out.push(el().key("crop-dim").absolute(0.0, 0.0).size(vw, vh).fill(dim).inert()),
+        Some(r) => {
+            let p0 = s.to_screen([r[0], r[1]]);
+            let p1 = s.to_screen([r[0] + r[2], r[1] + r[3]]);
+            let (l, top, rr, b) = (p0[0].clamp(0.0, vw), p0[1].clamp(0.0, vh), p1[0].clamp(0.0, vw), p1[1].clamp(0.0, vh));
+            for (i, [x, y, w, h]) in
+                [[0.0, 0.0, vw, top], [0.0, b, vw, vh - b], [0.0, top, l, b - top], [rr, top, vw - rr, b - top]].into_iter().enumerate()
+            {
+                out.push(el().key(format!("crop-dim-{i}")).absolute(x, y).size(w.max(0.0), h.max(0.0)).fill(dim).inert());
+            }
+            let outline = Shape::new().stroke_with(
+                vec![[p0[0], p0[1]], [p1[0], p0[1]], [p1[0], p1[1]], [p0[0], p1[1]]],
+                true,
+                1.5,
+                LineCap::Butt,
+                Color::WHITE,
+            );
+            out.push(canvas(outline).key("crop-outline").absolute(0.0, 0.0).size(vw, vh).inert());
+            for (i, h) in crop_handles(r).into_iter().enumerate() {
+                let q = s.to_screen(h);
+                out.push(
+                    el().key(format!("crop-handle-{i}"))
+                        .absolute(q[0] - 5.0, q[1] - 5.0)
+                        .size(10.0, 10.0)
+                        .radius(2.0)
+                        .fill(Color::WHITE)
+                        .border(1.5, accent)
+                        .inert(),
+                );
+            }
+            let [_, _, cw, ch] = s.export_rect().unwrap_or_default();
+            let label_y = if p0[1] > 34.0 { p0[1] - 30.0 } else { p0[1] + 8.0 };
+            out.push(
+                row()
+                    .key("crop-size")
+                    .absolute(p0[0].max(4.0), label_y)
+                    .h(22.0)
+                    .px(8.0)
+                    .items_center()
+                    .radius(5.0)
+                    .fill(Color::BLACK.alpha(0.75))
+                    .child(text(format!("{cw} × {ch} px")).font(type_::LABEL).color(Color::WHITE))
+                    .inert(),
+            );
+        }
+    }
+    let bar_w = 560.0f32.min(vw - 24.0);
+    out.push(
+        row()
+            .key("crop-bar")
+            .absolute(((vw - bar_w) / 2.0).max(12.0), 12.0)
+            .w(bar_w)
+            .padding(8.0)
+            .gap(8.0)
+            .items_center()
+            .radius(10.0)
+            .fill(t.card)
+            .border(1.0, t.card_border)
+            .shadow(8.0, 24.0, Color::BLACK.alpha(0.4))
+            .child(
+                el().grow(1.0)
+                    .min_w(0.0)
+                    .px(6.0)
+                    .child(text("Drag on the image to choose the area to export.").font(type_::LABEL).color(t.text).truncate()),
+            )
+            .child(button("crop-cancel", "Cancel", false, true, accent).on_press(|s: &mut Editor| s.finish_crop(false)))
+            .child(
+                button("crop-done", "Use this area", true, s.export.custom.is_some(), accent)
+                    .on_press(|s: &mut Editor| s.finish_crop(true)),
+            ),
+    );
+    out
+}
+
 fn canvas_cursor(s: &Editor) -> Cursor {
+    if s.crop_pick && !s.panning() && !s.space {
+        return Cursor::Crosshair;
+    }
     if s.panning() {
         return Cursor::Grabbing;
     }
@@ -508,7 +593,8 @@ fn viewport(s: &Editor, accent: Color) -> El {
                 .pixels(&s.base)
                 .children(s.anns.iter().flat_map(|a| vector::annotation(a, iw, ih, &s.scale)))
                 .inert();
-            v = v.child(world).children(selection_overlay(s, accent));
+            v = v.child(world);
+            v = if s.crop_pick { v.children(crop_overlay(s, accent)) } else { v.children(selection_overlay(s, accent)) };
         }
         None => {
             v = v.center().child(
@@ -985,19 +1071,28 @@ fn export_view(s: &Editor, accent: Color) -> El {
     let t = theme();
     let o = &s.export;
     let (iw, ih) = s.picture.as_ref().map_or((1, 1), |p| p.rgba.dimensions());
-    let (w, h) = o.size((iw, ih));
+    let [_, _, rw, rh] = s.export_rect().unwrap_or([0, 0, iw, ih]);
+    let (w, h) = o.size((rw, rh));
+    // Trimming only means something for an image with transparent edges (a mosaic).
+    let has_edges = s.picture.as_ref().is_some_and(|p| p.filled != [0, 0, iw, ih]);
+    let mut crops = vec![(Area::Whole, "None".to_string())];
+    if has_edges {
+        crops.push((Area::Filled, "Trim empty edges".to_string()));
+    }
+    crops.push((Area::Custom, "Select an area".to_string()));
+    let crop = if o.area == Area::Filled && !has_edges { Area::Whole } else { o.area };
     let formats: Vec<_> = Format::ALL.iter().map(|f| (*f, f.name().to_string())).collect();
     let scales: Vec<_> = [0.25f32, 0.5, 1.0, 2.0].iter().map(|k| (*k, format!("{} %", (k * 100.0).round()))).collect();
-    let size_note = if o.format == Format::Pdf {
-        format!("{} × {} pt page, photo at full resolution", (w as f32 * 0.75).round(), (h as f32 * 0.75).round())
+    let result = if o.format == Format::Pdf {
+        format!("{} × {} pt page", (w as f32 * 0.75).round(), (h as f32 * 0.75).round())
     } else {
         format!("{w} × {h} px")
     };
     let note = match o.format {
         Format::Png => "Lossless, with transparency.",
-        Format::Jpeg => "Smallest for photos. No transparency: the photo is always included.",
-        Format::Webp => "Lossless and usually smaller than PNG, with transparency.",
-        Format::Pdf => "Annotations stay vectors, and their text can be selected, searched and copied.",
+        Format::Jpeg => "Smallest for photos, no transparency.",
+        Format::Webp => "Lossless, smaller than PNG, with transparency.",
+        Format::Pdf => "Vector annotations with selectable text.",
     };
     let mut card = col()
         .key("export-dialog")
@@ -1012,9 +1107,19 @@ fn export_view(s: &Editor, accent: Color) -> El {
         .child(section("Format"))
         .child(segmented("export-format", &formats, o.format, accent, |s, f| s.export.format = f))
         .child(text(note).font(type_::LABEL).color(t.text_secondary).wrap())
+        .child(section("Crop"))
+        .child(segmented("export-area", &crops, crop, accent, |s, a| s.set_export_area(a)))
+        .children((crop == Area::Custom).then(|| {
+            row()
+                .w_full()
+                .gap(8.0)
+                .items_center()
+                .child(text(format!("Area of {rw} × {rh} px")).font(type_::LABEL).color(t.text_secondary))
+                .child(spacer())
+                .child(button("export-area-edit", "Redraw…", false, true, accent).on_press(|s: &mut Editor| s.begin_crop()))
+        }))
         .child(section("Size"))
-        .child(segmented("export-scale", &scales, o.scale, accent, |s, k| s.export.scale = k))
-        .child(text(size_note).font(type_::LABEL).color(t.text_secondary));
+        .child(segmented("export-scale", &scales, o.scale, accent, |s, k| s.export.scale = k));
     if o.format == Format::Jpeg || (o.format == Format::Pdf && o.photo) {
         card = card.child(export_quality(o, accent));
     }
@@ -1030,6 +1135,8 @@ fn export_view(s: &Editor, accent: Color) -> El {
         row()
             .w_full()
             .gap(8.0)
+            .items_center()
+            .child(text(result).font(type_::LABEL).color(t.text_secondary))
             .child(spacer())
             .child(button("export-cancel", "Cancel", false, true, accent).on_press(|s: &mut Editor| s.export_open = false))
             .child(button("export-go", "Export…", true, true, accent).on_press_tx(export_dialog)),
@@ -1525,6 +1632,8 @@ pub fn on_key(s: &mut Editor, e: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Escape if s.color_tool.is_some() => s.color_tool = None,
         Key::Enter if s.color_tool.is_some() => s.apply_color_tool(),
         Key::Escape if s.font_menu => s.font_menu = false,
+        Key::Escape if s.crop_pick => s.finish_crop(false),
+        Key::Enter if s.crop_pick => s.finish_crop(true),
         Key::Escape if s.stitcher.is_open() => s.stitcher.close(),
         Key::Enter if s.stitcher.can_start() => s.stitcher.start(),
         Key::Escape if s.export_open => s.export_open = false,
@@ -1534,7 +1643,7 @@ pub fn on_key(s: &mut Editor, e: &KeyEvent, tx: &mut Tx) -> bool {
             'z' => s.undo(),
             'y' => s.redo(),
             'o' => s.stitcher.open(),
-            'e' | 's' if s.picture.is_some() => s.export_open = true,
+            'e' | 's' if s.picture.is_some() && !s.crop_pick => s.export_open = true,
             'c' => s.copy(),
             'v' => s.paste(None),
             'f' => s.fit(),
@@ -1547,7 +1656,7 @@ pub fn on_key(s: &mut Editor, e: &KeyEvent, tx: &mut Tx) -> bool {
             _ => return false,
         },
         Key::Escape if typing => tx.blur(),
-        _ if typing || s.color_tool.is_some() || s.export_open || s.stitcher.is_open() => return false,
+        _ if typing || s.color_tool.is_some() || s.export_open || s.stitcher.is_open() || s.crop_pick => return false,
         Key::Delete | Key::Backspace => s.delete_selected(),
         Key::Escape => s.escape(),
         Key::Enter => s.finish_wire(),

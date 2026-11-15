@@ -299,7 +299,7 @@ pub fn stitch(mut images: Vec<(String, RgbImage)>, opts: &Options, progress: &Pr
 /// The largest axis-aligned rectangle of opaque pixels, `(x, y, width, height)`: for each row,
 /// the opaque run above every pixel is a histogram, and its largest rectangle is found with a
 /// stack in one pass.
-fn largest_filled_rect(img: &RgbaImage) -> Option<(u32, u32, u32, u32)> {
+pub fn largest_filled_rect(img: &RgbaImage) -> Option<(u32, u32, u32, u32)> {
     let (w, h) = (img.width() as usize, img.height() as usize);
     let raw = img.as_raw();
     let mut heights = vec![0usize; w];

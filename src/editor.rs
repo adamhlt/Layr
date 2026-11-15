@@ -8,7 +8,7 @@ use crate::color::{self, ColorTool};
 
 use crate::measure::{Scale, Unit};
 use crate::model::{Annotation, Handle, Kind, Shape, Style, snap45};
-use crate::render::{self, ExportOptions};
+use crate::render::{self, Area, ExportOptions};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
@@ -37,6 +37,8 @@ impl Tool {
 pub struct Picture {
     pub path: PathBuf,
     pub rgba: image::RgbaImage,
+    /// The largest rectangle without transparent pixels, `[x, y, w, h]`.
+    pub filled: [u32; 4],
 }
 
 impl Picture {
@@ -88,6 +90,24 @@ pub enum Hover {
 
 /// Handle grab radius, in screen points.
 const GRAB: f32 = 8.0;
+
+/// What a press on the canvas took hold of while choosing the export area.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CropGrab {
+    /// Drawing a new rectangle from the press.
+    New,
+    Move,
+    /// One of [`crop_handles`].
+    Handle(usize),
+}
+
+/// The handles of an `[x, y, w, h]` rectangle: corners and edge middles, clockwise from the
+/// top left.
+pub fn crop_handles(r: [f32; 4]) -> [[f32; 2]; 8] {
+    let [x, y, w, h] = r;
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    [[x, y], [cx, y], [x + w, y], [x + w, cy], [x + w, y + h], [cx, y + h], [x, y + h], [x, cy]]
+}
 
 pub struct Editor {
     pub picture: Option<Picture>,
@@ -153,6 +173,11 @@ pub struct Editor {
     pub font_query: TextEdit,
 
     pub status: String,
+    /// Choosing the export area on the canvas.
+    pub crop_pick: bool,
+    crop_grab: Option<(CropGrab, Option<[f32; 4]>, [f32; 2])>,
+    /// The area to go back to if choosing is cancelled.
+    crop_backup: Option<(Area, Option<[f32; 4]>)>,
     pub updater: crate::update::Updater,
     pub stitcher: crate::stitch::job::Stitcher,
 }
@@ -201,6 +226,9 @@ impl Editor {
             export: ExportOptions::default(),
             font_query: TextEdit::new(""),
             status: "Open an image (Ctrl+O) or drop one on the window.".into(),
+            crop_pick: false,
+            crop_grab: None,
+            crop_backup: None,
             updater: crate::update::Updater::new(),
             stitcher: crate::stitch::job::Stitcher::new(),
         }
@@ -228,8 +256,19 @@ impl Editor {
         }
         self.base.set(w, h, rgba.as_raw().clone());
         self.status = format!("{} — {w}×{h} px", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-        self.picture = Some(Picture { path, rgba });
+        let filled = if rgba.pixels().all(|p| p[3] == 255) {
+            [0, 0, w, h]
+        } else {
+            crate::stitch::largest_filled_rect(&rgba).map_or([0, 0, w, h], |(x, y, fw, fh)| [x, y, fw, fh])
+        };
+        self.picture = Some(Picture { path, rgba, filled });
         self.export_open = false;
+        // A drawn area belonged to the previous image.
+        self.export.custom = None;
+        if self.export.area == Area::Custom {
+            self.export.area = Area::Whole;
+        }
+        (self.crop_pick, self.crop_grab, self.crop_backup) = (false, None, None);
         self.anns.clear();
         self.undo.clear();
         self.redo.clear();
@@ -241,10 +280,120 @@ impl Editor {
         self.fit();
     }
 
+    /// The part of the image the export takes, `[x, y, w, h]`.
+    pub fn export_rect(&self) -> Option<[u32; 4]> {
+        let pic = self.picture.as_ref()?;
+        let (w, h) = pic.rgba.dimensions();
+        Some(match (self.export.area, self.export.custom) {
+            (Area::Whole, _) | (Area::Custom, None) => [0, 0, w, h],
+            (Area::Filled, _) => pic.filled,
+            (Area::Custom, Some(r)) => render::clamp_rect(r, (w, h)),
+        })
+    }
+
+    /// Picks the export area; a custom one without a rectangle yet is drawn right away.
+    pub fn set_export_area(&mut self, area: Area) {
+        if area == Area::Custom && self.export.custom.is_none() {
+            self.begin_crop();
+        } else {
+            self.export.area = area;
+        }
+    }
+
+    /// Leaves the export dialog to draw the export area on the canvas.
+    pub fn begin_crop(&mut self) {
+        if self.picture.is_none() {
+            return;
+        }
+        self.finish_wire();
+        self.crop_backup = Some((self.export.area, self.export.custom));
+        self.export.area = Area::Custom;
+        (self.crop_pick, self.export_open) = (true, false);
+    }
+
+    /// Back to the export dialog, with the drawn area or, when `keep` is false, the one before.
+    pub fn finish_crop(&mut self, keep: bool) {
+        if !self.crop_pick {
+            return;
+        }
+        let backup = self.crop_backup.take();
+        if (!keep || self.export.custom.is_none())
+            && let Some((area, custom)) = backup
+        {
+            (self.export.area, self.export.custom) = (area, custom);
+        }
+        (self.crop_pick, self.crop_grab, self.export_open) = (false, None, true);
+    }
+
+    /// A drag on the canvas while choosing the export area: draws, moves or resizes it.
+    fn crop_drag(&mut self, d: &Drag, q: [f32; 2], p: [f32; 2]) {
+        let Some(pic) = &self.picture else { return };
+        let (iw, ih) = pic.size();
+        let p = [p[0].clamp(0.0, iw), p[1].clamp(0.0, ih)];
+        if d.phase == Phase::Down {
+            let prev = self.export.custom;
+            let grab = match prev {
+                Some(r) => {
+                    let near = |h: &[f32; 2]| {
+                        let s = self.to_screen(*h);
+                        (s[0] - q[0]).abs() <= GRAB && (s[1] - q[1]).abs() <= GRAB
+                    };
+                    if let Some(i) = crop_handles(r).iter().position(near) {
+                        CropGrab::Handle(i)
+                    } else if (r[0]..=r[0] + r[2]).contains(&p[0]) && (r[1]..=r[1] + r[3]).contains(&p[1]) {
+                        CropGrab::Move
+                    } else {
+                        CropGrab::New
+                    }
+                }
+                None => CropGrab::New,
+            };
+            self.crop_grab = Some((grab, prev, p));
+            return;
+        }
+        let Some((grab, prev, start)) = self.crop_grab else { return };
+        let o = prev.unwrap_or_default();
+        let next = match grab {
+            CropGrab::New => {
+                let (x0, y0) = (start[0].min(p[0]), start[1].min(p[1]));
+                [x0, y0, (p[0] - start[0]).abs(), (p[1] - start[1]).abs()]
+            }
+            CropGrab::Move => {
+                let dx = (p[0] - start[0]).clamp(-o[0], iw - o[0] - o[2]);
+                let dy = (p[1] - start[1]).clamp(-o[1], ih - o[1] - o[3]);
+                [o[0] + dx, o[1] + dy, o[2], o[3]]
+            }
+            CropGrab::Handle(i) => {
+                let (mut l, mut t, mut r, mut b) = (o[0], o[1], o[0] + o[2], o[1] + o[3]);
+                match i {
+                    0 => (l, t) = (p[0], p[1]),
+                    1 => t = p[1],
+                    2 => (r, t) = (p[0], p[1]),
+                    3 => r = p[0],
+                    4 => (r, b) = (p[0], p[1]),
+                    5 => b = p[1],
+                    6 => (l, b) = (p[0], p[1]),
+                    _ => l = p[0],
+                }
+                [l.min(r), t.min(b), (r - l).abs(), (b - t).abs()]
+            }
+        };
+        self.export.custom = Some(next);
+        if d.phase == Phase::Up {
+            // A click, or a cancelled drag, leaves the area as it was.
+            let tiny = next[2] < 2.0 || next[3] < 2.0;
+            if d.cancelled() || tiny {
+                self.export.custom = prev;
+            }
+            self.crop_grab = None;
+        }
+    }
+
     pub fn export(&mut self, path: &Path) {
         self.finish_wire();
+        let Some(rect) = self.export_rect() else { return };
         let Some(pic) = &self.picture else { return };
-        self.status = match render::export(&pic.rgba, &self.anns, &self.scale, &self.export, path) {
+        self.status = match render::export(&pic.rgba, &self.anns, &self.scale, &self.export, rect, path) {
             Ok(()) => format!("Exported {}", path.display()),
             Err(e) => format!("Export failed: {e}"),
         };
@@ -657,6 +806,14 @@ impl Editor {
         let q = [d.x, d.y];
         let p = self.to_image(q);
         let shift = tx.mods().shift;
+        // Choosing the export area takes the canvas, except to pan it.
+        if self.crop_pick && self.picture.is_some() {
+            let pan = d.phase == Phase::Down && (self.space || tx.button() == PointerButton::Middle);
+            if !pan && !matches!(self.gesture, Gesture::Pan { .. }) {
+                self.crop_drag(d, q, p);
+                return;
+            }
+        }
         if d.phase == Phase::Down {
             let pan = self.space || tx.button() == PointerButton::Middle;
             self.press(q, p, d.clicks, pan);
@@ -1012,10 +1169,48 @@ mod tests {
 
     fn editor() -> Editor {
         let mut e = Editor::new();
-        e.picture = Some(Picture { path: "t.png".into(), rgba: image::RgbaImage::new(2000, 1000) });
+        e.picture = Some(Picture { path: "t.png".into(), rgba: image::RgbaImage::new(2000, 1000), filled: [0, 0, 2000, 1000] });
         e.viewport = [0.0, 0.0, 1000.0, 500.0];
         e.fit();
         e
+    }
+
+    #[test]
+    fn the_export_area_follows_the_choice() {
+        let mut e = editor();
+        e.picture.as_mut().unwrap().filled = [10, 20, 1500, 900];
+        assert_eq!(e.export_rect(), Some([0, 0, 2000, 1000]));
+        e.set_export_area(Area::Filled);
+        assert_eq!(e.export_rect(), Some([10, 20, 1500, 900]));
+        e.export.custom = Some([100.4, -50.0, 300.0, 200.0]);
+        e.set_export_area(Area::Custom);
+        assert!(!e.crop_pick, "an area already drawn is reused");
+        assert_eq!(e.export_rect(), Some([100, 0, 300, 150]), "cut to the image");
+    }
+
+    #[test]
+    fn a_cancelled_area_restores_the_previous_one() {
+        let mut e = editor();
+        e.export_open = true;
+        e.set_export_area(Area::Custom);
+        assert!(e.crop_pick && !e.export_open, "nothing drawn yet: the canvas opens");
+        e.export.custom = Some([0.0, 0.0, 50.0, 50.0]);
+        e.finish_crop(false);
+        assert_eq!((e.export.area, e.export.custom), (Area::Whole, None));
+        assert!(e.export_open && !e.crop_pick);
+        e.begin_crop();
+        e.export.custom = Some([0.0, 0.0, 50.0, 50.0]);
+        e.finish_crop(true);
+        assert_eq!((e.export.area, e.export_rect()), (Area::Custom, Some([0, 0, 50, 50])));
+    }
+
+    #[test]
+    fn a_new_image_forgets_the_drawn_area() {
+        let mut e = editor();
+        e.export.custom = Some([0.0, 0.0, 50.0, 50.0]);
+        e.export.area = Area::Custom;
+        e.load_mosaic(image::RgbaImage::from_pixel(40, 30, image::Rgba([1, 2, 3, 255])));
+        assert_eq!((e.export.area, e.export.custom, e.export_rect()), (Area::Whole, None, Some([0, 0, 40, 30])));
     }
 
     #[test]
