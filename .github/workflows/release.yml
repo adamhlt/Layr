@@ -1,11 +1,17 @@
 name: Release
 
 # Push a tag such as `v0.1.0` to build Windows, Linux and macOS binaries and publish them
-# together in one GitHub release. "Run workflow" builds them without publishing.
+# together in one GitHub release. "Run workflow" on GitHub does the same for the tag typed in
+# its "tag" field (to rebuild a release's files), or only builds when the field is empty.
 on:
   push:
     tags: ["v*", "[0-9]*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach the files to (e.g. v1.1). Empty: build only, publish nothing."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -13,6 +19,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   APP: layr
+  # The release being built: the pushed tag, or the one typed when running the workflow by hand.
+  TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name || '') }}
 
 jobs:
   build:
@@ -30,13 +38,16 @@ jobs:
             os: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A hand-run release builds the tag's code, not the branch it was started from.
+          ref: ${{ inputs.tag || github.ref }}
 
       # The release's version is its tag (`v1.2` or `1.2`): the app reports it, and compares it
       # with the latest release to offer updates, so it must not stay at Cargo.toml's.
       - name: Version from the tag
-        if: startsWith(github.ref, 'refs/tags/')
+        if: env.TAG != ''
         shell: bash
-        run: echo "LAYR_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+        run: echo "LAYR_VERSION=${TAG#v}" >> "$GITHUB_ENV"
 
       # rust-toolchain.toml pins the compiler; rustup installs it on first use.
       - name: Rust toolchain
@@ -123,7 +134,7 @@ jobs:
   release:
     name: Publish release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -136,12 +147,12 @@ jobs:
         run: |
           ls -la dist
           # Attach to the release if it already exists (e.g. created by hand), else create it.
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* \
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* \
               --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/* \
+            gh release create "$TAG" dist/* \
               --repo "$GITHUB_REPOSITORY" \
-              --title "Layr $GITHUB_REF_NAME" \
+              --title "Layr $TAG" \
               --generate-notes
           fi
