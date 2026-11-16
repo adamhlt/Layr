@@ -21,7 +21,9 @@ over photos, then exporting the result in full resolution. It can also stitch ov
 into one large image first. It's made for repair notes, technical documentation and annotated
 screenshots.
 
-<p align="center"><img src="docs/screenshot.jpg" alt="Layr with an Intel 8086 die photo annotated with boxes, hatching, numbered badges and a legend"></p>
+<p align="center"><img src="https://github.com/user-attachments/assets/37b0810d-aef8-44d5-9729-be1ab710a8ea" alt="Layr with an Intel 8086 die photo annotated with boxes, hatching, numbered badges and a legend"></p>
+
+https://github.com/user-attachments/assets/b1456511-df09-4ec5-8a63-1652c9dc9362
 
 ## Features
 
@@ -47,7 +49,7 @@ screenshots.
 **Open** (`Ctrl+O`) one image, or a list of photos to stitch: pick several at once, add a folder,
 or drop them on the window.
 
-<p align="center"><img src="docs/before-after.jpg" alt="An Intel 8086 die photo, before and after annotating it in Layr"></p>
+<p align="center"><img src="https://github.com/user-attachments/assets/b50888ba-1eba-4eea-95b7-de83e8dbfea4" alt="An Intel 8086 die photo, before and after annotating it in Layr"></p>
 <p align="center"><sub>Siemens SAB 8086 die (an Intel 8086 made under licence) by <a href="https://commons.wikimedia.org/wiki/File:Siemens_SAB_8086_die.JPG">Pauli Rautakorpi</a>, <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>, resized and annotated. Block positions from Ken Shirriff's <a href="https://www.righto.com/2020/06/a-look-at-die-of-8086-processor.html">look at the 8086 die</a>.</sub></p>
 
 ## Shortcuts
