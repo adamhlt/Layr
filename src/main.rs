@@ -58,7 +58,7 @@ fn main() {
     if let Err(e) = rune::set_app_icon(include_bytes!("../assets/icon/icon-macos.png").as_slice()) {
         eprintln!("layr: {e}");
     }
-    rune::run(AppSpec {
+    let spec = AppSpec {
         min_size: Some((900.0, 600.0)),
         poll: Some(poll),
         // Background work (update checks, downloads, stitching) wakes the idle window with it.
@@ -68,5 +68,9 @@ fn main() {
         }),
         on_key: Some(ui::on_key),
         ..AppSpec::new("Layr", (1400.0, 900.0), init, ui::view)
-    });
+    };
+    // macOS: a standard titled window. Rune's default draws the content under a transparent
+    // titlebar, so the traffic lights and the titlebar band would cover the top of the view.
+    // Windows and Linux keep their native frame either way.
+    rune::App::new(spec).chrome(rune::Chrome { full_size_content: false, ..rune::Chrome::DEFAULT }).run();
 }
