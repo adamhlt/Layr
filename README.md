@@ -86,6 +86,10 @@ cargo run --release
 - **Linux**: needs `libxkbcommon-dev` and `libwayland-dev`.
 - **Release**: pushing a `v*` tag builds all three platforms into one GitHub release.
 
+## Use of AI
+
+AI assistance was used in this project, for code, tests and documentation. The authors reviewed the result and remain responsible for it.
+
 ## License
 
 Layr is free software under the [GNU General Public License v3.0](LICENSE) or any later version.
