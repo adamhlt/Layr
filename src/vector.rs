@@ -8,10 +8,23 @@ use crate::font;
 use crate::measure::{self, Scale};
 use crate::model::{Annotation, BadgeShape, Hatch, Kind, PANEL, Rgba, Shape as Geo, Style};
 
-fn label(s: &str, st: &Style, color: Rgba, origin: [f32; 2]) -> El {
-    let (w, h) = font::text_size(s, st);
+/// How much larger than its size in image pixels text is laid out, then scaled back down, at
+/// camera zoom `zoom`.
+///
+/// Rune rasterizes text at the zoom it's seen at, but only up to 4×: past that it draws the
+/// glyphs made at 1× magnified, and a small image's labels (a few pixels high) turn blocky.
+/// Text laid out `k` times larger under a `1/k` scale is seen at `zoom / k`, kept under 4×. `k`
+/// moves in powers of two so it changes rarely.
+pub fn text_boost(zoom: f32) -> f32 {
+    if zoom <= 2.0 { 1.0 } else { 2.0f32.powf((zoom / 2.0).log2().ceil()) }
+}
+
+fn label(s: &str, st: &Style, color: Rgba, origin: [f32; 2], k: f32) -> El {
+    let big = Style { font_size: st.font_size * k, ..st.clone() };
+    let (w, h) = font::text_size(s, &big);
     // Sized as Rune measured it, plus a hair, so it never wraps.
-    text(s).font(font::text_style(st, st.font_size)).color(color.to_rune()).absolute(origin[0], origin[1]).size(w + 1.0, h)
+    let t = text(s).font(font::text_style(&big, big.font_size)).color(color.to_rune()).absolute(origin[0], origin[1]).size(w + 1.0, h);
+    if k == 1.0 { t } else { t.origin(0.0, 0.0).scale(1.0 / k) }
 }
 
 /// A rounded rectangle as a convex polygon, for clipping hatch lines.
@@ -139,11 +152,11 @@ pub fn label_box(l: &measure::Label, st: &Style) -> [f32; 4] {
     [l.center[0] - w / 2.0, l.center[1] - h / 2.0, w, h]
 }
 
-fn size_label(l: &measure::Label, a: &Annotation, out: &mut Vec<El>) {
+fn size_label(l: &measure::Label, a: &Annotation, k: f32, out: &mut Vec<El>) {
     let st = label_style(a);
     let [x, y, w, h] = label_box(l, &st);
     out.push(el().absolute(x, y).size(w, h).radius(st.radius).fill(st.fill.to_rune()));
-    out.push(label(&l.text, &st, st.text_color, [x + st.padding, y + st.padding]));
+    out.push(label(&l.text, &st, st.text_color, [x + st.padding, y + st.padding], k));
 }
 
 /// A circle, diamond or hexagon badge: fill, hatch and outline from one polygon.
@@ -167,21 +180,22 @@ fn badge_polygon(b: [f32; 4], st: &Style, iw: f32, ih: f32, out: &mut Vec<El>) {
 /// Each element is keyed by the annotation and a hash of its style, and has no transition: a
 /// style change swaps elements in one frame instead of cross-fading old and new (which flashed
 /// the fill when a badge changed shape), and moves and resizes keep their elements.
-pub fn annotation(a: &Annotation, iw: f32, ih: f32, scale: &Scale) -> Vec<El> {
+pub fn annotation(a: &Annotation, iw: f32, ih: f32, scale: &Scale, k: f32) -> Vec<El> {
     let look = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        format!("{:?}{:?}{}{:?}", a.kind, a.style, a.text, scale).hash(&mut h);
+        // A new boost swaps the text rather than springing its scale.
+        format!("{:?}{:?}{}{:?}{k}", a.kind, a.style, a.text, scale).hash(&mut h);
         h.finish()
     };
-    let mut parts = annotation_parts(a, iw, ih);
+    let mut parts = annotation_parts(a, iw, ih, k);
     if let Some(l) = measure::label(a, scale) {
-        size_label(&l, a, &mut parts);
+        size_label(&l, a, k, &mut parts);
     }
     parts.into_iter().enumerate().map(|(i, e)| e.key(format!("ann-{}-{i}-{look:x}", a.id)).transition(Transition::none())).collect()
 }
 
-fn annotation_parts(a: &Annotation, iw: f32, ih: f32) -> Vec<El> {
+fn annotation_parts(a: &Annotation, iw: f32, ih: f32, k: f32) -> Vec<El> {
     let st = &a.style;
     let mut out = Vec::new();
     match &a.shape {
@@ -198,9 +212,9 @@ fn annotation_parts(a: &Annotation, iw: f32, ih: f32) -> Vec<El> {
             if let Some(origin) = a.label_origin() {
                 if a.kind != Kind::Badge {
                     let shadow = (st.font_size / 18.0).max(1.0);
-                    out.push(label(&a.text, st, Rgba::new(0, 0, 0, 180), [origin[0] + shadow, origin[1] + shadow]));
+                    out.push(label(&a.text, st, Rgba::new(0, 0, 0, 180), [origin[0] + shadow, origin[1] + shadow], k));
                 }
-                out.push(label(&a.text, st, st.text_color, origin));
+                out.push(label(&a.text, st, st.text_color, origin, k));
             }
         }
         Geo::Polyline { points } => {
@@ -242,17 +256,17 @@ fn annotation_parts(a: &Annotation, iw: f32, ih: f32) -> Vec<El> {
             let l = crate::legend::layout(a);
             boxed(l.frame, st, None, iw, ih, &mut out);
             if let Some(at) = l.title {
-                out.push(label(&a.text, st, st.text_color, at));
+                out.push(label(&a.text, st, st.text_color, at, k));
             }
             for row in &l.rows {
-                out.extend(annotation_parts(&row.sample, iw, ih));
-                out.push(label(&row.label, st, st.text_color, row.label_origin));
+                out.extend(annotation_parts(&row.sample, iw, ih, k));
+                out.push(label(&row.label, st, st.text_color, row.label_origin, k));
             }
         }
         Geo::Text { pos } => {
             let (w, h) = font::box_size(&a.text, st);
             boxed([pos[0], pos[1], w, h], st, None, iw, ih, &mut out);
-            out.push(label(&a.text, st, st.text_color, [pos[0] + st.padding, pos[1] + st.padding]));
+            out.push(label(&a.text, st, st.text_color, [pos[0] + st.padding, pos[1] + st.padding], k));
         }
     }
     out
@@ -261,6 +275,18 @@ fn annotation_parts(a: &Annotation, iw: f32, ih: f32) -> Vec<El> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_is_never_seen_past_four_times_its_layout_size() {
+        for i in 0..400 {
+            let zoom = 0.02 * 1.03f32.powi(i);
+            let seen = zoom / text_boost(zoom);
+            assert!(seen <= 4.0, "zoom {zoom}: seen at {seen}");
+            assert!(seen >= 1.0 || text_boost(zoom) == 1.0, "zoom {zoom}: boosted needlessly");
+        }
+        assert_eq!(text_boost(1.5), 1.0);
+        assert_eq!(text_boost(10.0), 8.0);
+    }
 
     #[test]
     fn hatch_lines_stay_inside_the_box() {

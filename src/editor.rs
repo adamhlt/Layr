@@ -91,6 +91,12 @@ pub enum Hover {
 /// Handle grab radius, in screen points.
 const GRAB: f32 = 8.0;
 
+/// The bar shown while choosing an area: its distance from the viewport's top and its height.
+pub const CROP_BAR_TOP: f32 = 12.0;
+pub const CROP_BAR_H: f32 = 44.0;
+/// The room the bar takes at the top of the viewport, with a gap before the image.
+const CROP_BAR_SPACE: f32 = CROP_BAR_TOP + CROP_BAR_H + 16.0;
+
 /// What a press on the canvas took hold of while choosing the export area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CropGrab {
@@ -109,14 +115,43 @@ pub fn crop_handles(r: [f32; 4]) -> [[f32; 2]; 8] {
     [[x, y], [cx, y], [x + w, y], [x + w, cy], [x + w, y + h], [cx, y + h], [x, y + h], [x, cy]]
 }
 
+/// One step of the history: the annotations and, for a crop, the image before it (its pixels
+/// and its filled rectangle).
+struct Snapshot {
+    anns: Vec<Annotation>,
+    image: Option<(image::RgbaImage, [u32; 4])>,
+}
+
+/// The cursor's look over handle `i` of `a` (see [`Annotation::handles`] for the order).
+fn handle_hover(a: &Annotation, i: Handle) -> Hover {
+    match (&a.shape, i) {
+        // The top-left and bottom-right corners resize along `\`, the other two along `/`.
+        (Shape::Rect { .. }, 0 | 2) => Hover::ResizeDown,
+        (Shape::Rect { .. }, 1 | 3) => Hover::ResizeUp,
+        (Shape::Rect { .. }, 4 | 6) => Hover::ResizeY,
+        (Shape::Rect { .. }, _) | (Shape::Dot { .. }, _) => Hover::ResizeX,
+        _ => Hover::Point,
+    }
+}
+
+/// The largest rectangle of `rgba` without transparent pixels, `[x, y, w, h]`.
+fn filled_rect(rgba: &image::RgbaImage) -> [u32; 4] {
+    let (w, h) = rgba.dimensions();
+    if rgba.pixels().all(|p| p[3] == 255) {
+        [0, 0, w, h]
+    } else {
+        crate::stitch::largest_filled_rect(rgba).map_or([0, 0, w, h], |(x, y, fw, fh)| [x, y, fw, fh])
+    }
+}
+
 pub struct Editor {
     pub picture: Option<Picture>,
     pub anns: Vec<Annotation>,
     next_id: u64,
     pub selected: Option<u64>,
     pub tool: Tool,
-    undo: Vec<Vec<Annotation>>,
-    redo: Vec<Vec<Annotation>>,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
 
     pub base: Pixels,
     dirty: bool,
@@ -173,8 +208,12 @@ pub struct Editor {
     pub font_query: TextEdit,
 
     pub status: String,
-    /// Choosing the export area on the canvas.
+    /// Choosing an area on the canvas: the export's, or with `crop_image` the image's.
     pub crop_pick: bool,
+    /// The area being chosen crops the image itself rather than the export.
+    pub crop_image: bool,
+    /// The part of the image to keep, while cropping it.
+    pub image_crop: Option<[f32; 4]>,
     crop_grab: Option<(CropGrab, Option<[f32; 4]>, [f32; 2])>,
     /// The area to go back to if choosing is cancelled.
     crop_backup: Option<(Area, Option<[f32; 4]>)>,
@@ -227,6 +266,8 @@ impl Editor {
             font_query: TextEdit::new(""),
             status: "Open an image (Ctrl+O) or drop one on the window.".into(),
             crop_pick: false,
+            crop_image: false,
+            image_crop: None,
             crop_grab: None,
             crop_backup: None,
             updater: crate::update::Updater::new(),
@@ -256,11 +297,7 @@ impl Editor {
         }
         self.base.set(w, h, rgba.as_raw().clone());
         self.status = format!("{} — {w}×{h} px", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-        let filled = if rgba.pixels().all(|p| p[3] == 255) {
-            [0, 0, w, h]
-        } else {
-            crate::stitch::largest_filled_rect(&rgba).map_or([0, 0, w, h], |(x, y, fw, fh)| [x, y, fw, fh])
-        };
+        let filled = filled_rect(&rgba);
         self.picture = Some(Picture { path, rgba, filled });
         self.export_open = false;
         // A drawn area belonged to the previous image.
@@ -269,6 +306,7 @@ impl Editor {
             self.export.area = Area::Whole;
         }
         (self.crop_pick, self.crop_grab, self.crop_backup) = (false, None, None);
+        (self.crop_image, self.image_crop) = (false, None);
         self.anns.clear();
         self.undo.clear();
         self.redo.clear();
@@ -308,12 +346,99 @@ impl Editor {
         self.finish_wire();
         self.crop_backup = Some((self.export.area, self.export.custom));
         self.export.area = Area::Custom;
+        self.hover = Hover::Nothing;
         (self.crop_pick, self.export_open) = (true, false);
+        self.fit();
     }
 
-    /// Back to the export dialog, with the drawn area or, when `keep` is false, the one before.
+    /// Starts choosing the part of the image to keep: the whole image at first, for its edges
+    /// to be dragged in.
+    pub fn begin_image_crop(&mut self) {
+        let Some(pic) = &self.picture else { return };
+        if self.crop_pick {
+            return;
+        }
+        let (w, h) = pic.size();
+        self.finish_wire();
+        self.selected = None;
+        self.hover = Hover::Nothing;
+        (self.crop_pick, self.crop_image, self.image_crop, self.export_open) = (true, true, Some([0.0, 0.0, w, h]), false);
+        self.fit();
+    }
+
+    /// What a press at viewport point `q` (image point `p`) would take hold of while choosing
+    /// an area.
+    fn crop_grab_at(&self, q: [f32; 2], p: [f32; 2]) -> CropGrab {
+        let Some(r) = self.crop_area() else { return CropGrab::New };
+        let near = |h: &[f32; 2]| {
+            let s = self.to_screen(*h);
+            (s[0] - q[0]).abs() <= GRAB && (s[1] - q[1]).abs() <= GRAB
+        };
+        if let Some(i) = crop_handles(r).iter().position(near) {
+            return CropGrab::Handle(i);
+        }
+        // An area as large as the image has nowhere to move: a drag in it draws a new one.
+        let whole = self.picture.as_ref().is_some_and(|pic| {
+            let (w, h) = pic.size();
+            r[0] <= 0.0 && r[1] <= 0.0 && r[0] + r[2] >= w && r[1] + r[3] >= h
+        });
+        let inside = (r[0]..=r[0] + r[2]).contains(&p[0]) && (r[1]..=r[1] + r[3]).contains(&p[1]);
+        if inside && !whole { CropGrab::Move } else { CropGrab::New }
+    }
+
+    /// The cursor's look over an area being chosen, or while dragging it.
+    fn crop_hover(&self, q: [f32; 2]) -> Hover {
+        let grab = match self.crop_grab {
+            Some((grab, ..)) => grab,
+            None => self.crop_grab_at(q, self.to_image(q)),
+        };
+        match grab {
+            CropGrab::New => Hover::Nothing,
+            CropGrab::Move => Hover::Body,
+            // `crop_handles` order: clockwise from the top left, corners and edges.
+            CropGrab::Handle(0 | 4) => Hover::ResizeDown,
+            CropGrab::Handle(2 | 6) => Hover::ResizeUp,
+            CropGrab::Handle(1 | 5) => Hover::ResizeY,
+            CropGrab::Handle(_) => Hover::ResizeX,
+        }
+    }
+
+    /// The area being chosen on the canvas, in image pixels.
+    pub fn crop_area(&self) -> Option<[f32; 4]> {
+        if self.crop_image { self.image_crop } else { self.export.custom }
+    }
+
+    fn set_crop_area(&mut self, r: Option<[f32; 4]>) {
+        if self.crop_image {
+            self.image_crop = r;
+        } else {
+            self.export.custom = r;
+        }
+    }
+
+    /// The area being chosen, in whole pixels within the image.
+    pub fn crop_area_px(&self) -> Option<[u32; 4]> {
+        if !self.crop_image {
+            return self.export_rect();
+        }
+        let pic = self.picture.as_ref()?;
+        Some(render::clamp_rect(self.image_crop?, pic.rgba.dimensions()))
+    }
+
+    /// Ends choosing an area. For the export, back to its dialog with the drawn area or, when
+    /// `keep` is false, the one before; for the image, crops it to the area when `keep`.
     pub fn finish_crop(&mut self, keep: bool) {
         if !self.crop_pick {
+            return;
+        }
+        self.hover = Hover::Nothing;
+        if self.crop_image {
+            let rect = self.crop_area_px().filter(|_| keep && self.image_crop.is_some());
+            (self.crop_pick, self.crop_image, self.image_crop, self.crop_grab) = (false, false, None, None);
+            self.fit();
+            if let Some(r) = rect {
+                self.crop_to(r);
+            }
             return;
         }
         let backup = self.crop_backup.take();
@@ -323,6 +448,7 @@ impl Editor {
             (self.export.area, self.export.custom) = (area, custom);
         }
         (self.crop_pick, self.crop_grab, self.export_open) = (false, None, true);
+        self.fit();
     }
 
     /// A drag on the canvas while choosing the export area: draws, moves or resizes it.
@@ -331,24 +457,8 @@ impl Editor {
         let (iw, ih) = pic.size();
         let p = [p[0].clamp(0.0, iw), p[1].clamp(0.0, ih)];
         if d.phase == Phase::Down {
-            let prev = self.export.custom;
-            let grab = match prev {
-                Some(r) => {
-                    let near = |h: &[f32; 2]| {
-                        let s = self.to_screen(*h);
-                        (s[0] - q[0]).abs() <= GRAB && (s[1] - q[1]).abs() <= GRAB
-                    };
-                    if let Some(i) = crop_handles(r).iter().position(near) {
-                        CropGrab::Handle(i)
-                    } else if (r[0]..=r[0] + r[2]).contains(&p[0]) && (r[1]..=r[1] + r[3]).contains(&p[1]) {
-                        CropGrab::Move
-                    } else {
-                        CropGrab::New
-                    }
-                }
-                None => CropGrab::New,
-            };
-            self.crop_grab = Some((grab, prev, p));
+            let grab = self.crop_grab_at(q, p);
+            self.crop_grab = Some((grab, self.crop_area(), p));
             return;
         }
         let Some((grab, prev, start)) = self.crop_grab else { return };
@@ -382,15 +492,53 @@ impl Editor {
                 [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)]
             }
         };
-        self.export.custom = Some(next);
+        self.set_crop_area(Some(next));
         if d.phase == Phase::Up {
             // A click, or a cancelled drag, leaves the area as it was.
             let tiny = next[2] < 2.0 || next[3] < 2.0;
             if d.cancelled() || tiny {
-                self.export.custom = prev;
+                self.set_crop_area(prev);
             }
             self.crop_grab = None;
         }
+    }
+
+    /// Crops the image to `[x, y, w, h]` (whole pixels inside it), moving the annotations with
+    /// it, as one undoable step.
+    fn crop_to(&mut self, [x, y, w, h]: [u32; 4]) {
+        let Some(pic) = &self.picture else { return };
+        if [x, y, w, h] == [0, 0, pic.rgba.width(), pic.rgba.height()] {
+            return;
+        }
+        let cropped = image::imageops::crop_imm(&pic.rgba, x, y, w, h).to_image();
+        let filled = filled_rect(&cropped);
+        let before = self.replace_image(cropped, filled);
+        self.undo.push(Snapshot { anns: self.anns.clone(), image: Some(before) });
+        if self.undo.len() > 200 {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        let (dx, dy) = (-(x as f32), -(y as f32));
+        for a in &mut self.anns {
+            a.shape = a.translated(dx, dy);
+        }
+        self.status = format!("Cropped to {w}×{h} px");
+    }
+
+    /// Swaps in new pixels for the image, returning the old ones. A drawn export area belonged
+    /// to the old pixels, so it goes.
+    fn replace_image(&mut self, rgba: image::RgbaImage, filled: [u32; 4]) -> (image::RgbaImage, [u32; 4]) {
+        let pic = self.picture.as_mut().expect("an image to replace");
+        self.base.set(rgba.width(), rgba.height(), rgba.as_raw().clone());
+        let old = (std::mem::replace(&mut pic.rgba, rgba), std::mem::replace(&mut pic.filled, filled));
+        self.export.custom = None;
+        if self.export.area == Area::Custom {
+            self.export.area = Area::Whole;
+        }
+        self.dirty = true;
+        self.fit_pending = true;
+        self.fit();
+        old
     }
 
     pub fn export(&mut self, path: &Path) {
@@ -437,17 +585,19 @@ impl Editor {
         }
     }
 
-    /// Fits the whole image in the viewport.
+    /// Fits the whole image in the viewport; below the bar while choosing an area.
     pub fn fit(&mut self) {
         let Some(pic) = &self.picture else { return };
         let [_, _, vw, vh] = self.viewport;
-        if vw < 1.0 || vh < 1.0 {
+        let top = if self.crop_pick { CROP_BAR_SPACE } else { 0.0 };
+        let h = vh - top;
+        if vw < 1.0 || h < 1.0 {
             return;
         }
         self.fit_pending = false;
         let (iw, ih) = pic.size();
-        let zoom = (vw / iw).min(vh / ih) * 0.96;
-        self.set_camera([(vw - iw * zoom) / 2.0, (vh - ih * zoom) / 2.0], zoom);
+        let zoom = (vw / iw).min(h / ih) * 0.96;
+        self.set_camera([(vw - iw * zoom) / 2.0, top + (h - ih * zoom) / 2.0], zoom);
     }
 
     /// Zooms by `factor` keeping viewport point `q` still.
@@ -473,7 +623,7 @@ impl Editor {
     // ---- History ----------------------------------------------------------------------------
 
     pub fn push_history(&mut self) {
-        self.undo.push(self.anns.clone());
+        self.undo.push(Snapshot { anns: self.anns.clone(), image: None });
         if self.undo.len() > 200 {
             self.undo.remove(0);
         }
@@ -494,7 +644,8 @@ impl Editor {
     pub fn undo(&mut self) {
         self.finish_wire();
         if let Some(prev) = self.undo.pop() {
-            self.redo.push(std::mem::replace(&mut self.anns, prev));
+            let now = self.restore(prev);
+            self.redo.push(now);
             self.after_history();
         }
     }
@@ -502,9 +653,19 @@ impl Editor {
     pub fn redo(&mut self) {
         self.finish_wire();
         if let Some(next) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.anns, next));
+            let now = self.restore(next);
+            self.undo.push(now);
             self.after_history();
         }
+    }
+
+    /// Puts `snap` in place, returning what it replaced (the image too, for a crop).
+    fn restore(&mut self, snap: Snapshot) -> Snapshot {
+        if self.crop_image {
+            self.finish_crop(false);
+        }
+        let image = snap.image.map(|(rgba, filled)| self.replace_image(rgba, filled));
+        Snapshot { anns: std::mem::replace(&mut self.anns, snap.anns), image }
     }
 
     fn after_history(&mut self) {
@@ -629,6 +790,9 @@ impl Editor {
     }
 
     pub fn set_tool(&mut self, tool: Tool) {
+        if self.crop_image {
+            self.finish_crop(false);
+        }
         self.finish_wire();
         self.tool = tool;
         self.hover = Hover::Nothing;
@@ -817,12 +981,14 @@ impl Editor {
             let pan = d.phase == Phase::Down && (self.space || tx.button() == PointerButton::Middle);
             if !pan && !matches!(self.gesture, Gesture::Pan { .. }) {
                 self.crop_drag(d, q, p, keep_ratio);
+                self.hover = self.hover_at(q);
                 return;
             }
         }
         if d.phase == Phase::Down {
             let pan = self.space || tx.button() == PointerButton::Middle;
             self.press(q, p, d.clicks, pan);
+            self.hover = self.hover_at(q);
             return;
         }
         match self.gesture.clone() {
@@ -860,6 +1026,8 @@ impl Editor {
         if d.phase == Phase::Up {
             self.release(d.cancelled());
         }
+        // The pointer may not report moves while a button is down: the look follows the drag.
+        self.hover = self.hover_at(q);
     }
 
     fn press(&mut self, q: [f32; 2], p: [f32; 2], clicks: u32, pan: bool) {
@@ -983,7 +1151,7 @@ impl Editor {
     /// Restores the snapshot pushed when the cancelled gesture began.
     fn undo_in_place(&mut self) {
         if let Some(prev) = self.undo.pop() {
-            self.anns = prev;
+            self.anns = prev.anns;
             self.dirty = true;
         }
     }
@@ -1105,14 +1273,15 @@ impl Editor {
         if self.picture.is_none() || self.drawing_wire.is_some() {
             return Hover::Nothing;
         }
+        if self.crop_pick {
+            return self.crop_hover(q);
+        }
+        // A handle being dragged keeps its look, wherever the pointer is.
+        if let Gesture::Handle { orig, handle, .. } = &self.gesture {
+            return handle_hover(orig, *handle);
+        }
         if let Some((a, i)) = self.handle_at(q) {
-            return match (&a.shape, i) {
-                (Shape::Rect { .. }, 0 | 2) => Hover::ResizeDown,
-                (Shape::Rect { .. }, 1 | 3) => Hover::ResizeUp,
-                (Shape::Rect { .. }, 4 | 6) => Hover::ResizeY,
-                (Shape::Rect { .. }, _) | (Shape::Dot { .. }, _) => Hover::ResizeX,
-                _ => Hover::Point,
-            };
+            return handle_hover(&a, i);
         }
         if self.tool == Tool::Select && self.hit(self.to_image(q)).is_some() {
             return Hover::Body;
@@ -1217,6 +1386,77 @@ mod tests {
         e.export.area = Area::Custom;
         e.load_mosaic(image::RgbaImage::from_pixel(40, 30, image::Rgba([1, 2, 3, 255])));
         assert_eq!((e.export.area, e.export.custom, e.export_rect()), (Area::Whole, None, Some([0, 0, 40, 30])));
+    }
+
+    #[test]
+    fn cropping_the_image_moves_the_annotations_and_undoes() {
+        let mut e = editor();
+        e.add(Kind::Rect, Shape::Rect { x: 500.0, y: 300.0, w: 10.0, h: 10.0 });
+        e.begin_image_crop();
+        assert!(e.crop_pick && e.crop_image);
+        e.image_crop = Some([400.4, 200.0, 800.0, 2000.0]);
+        e.finish_crop(true);
+        assert!(!e.crop_pick && !e.crop_image);
+        assert_eq!(e.picture.as_ref().unwrap().rgba.dimensions(), (800, 800), "cut to the image");
+        assert_eq!(e.anns[0].shape, Shape::Rect { x: 100.0, y: 100.0, w: 10.0, h: 10.0 });
+        e.undo();
+        assert_eq!(e.picture.as_ref().unwrap().rgba.dimensions(), (2000, 1000));
+        assert_eq!(e.anns[0].shape, Shape::Rect { x: 500.0, y: 300.0, w: 10.0, h: 10.0 });
+        e.redo();
+        assert_eq!(e.picture.as_ref().unwrap().rgba.dimensions(), (800, 800));
+        assert_eq!(e.anns[0].shape, Shape::Rect { x: 100.0, y: 100.0, w: 10.0, h: 10.0 });
+    }
+
+    #[test]
+    fn the_image_crop_starts_on_the_whole_image_and_shows_its_handles() {
+        let mut e = editor();
+        e.begin_image_crop();
+        assert_eq!(e.image_crop, Some([0.0, 0.0, 2000.0, 1000.0]));
+        let at = |e: &Editor, p: [f32; 2]| e.hover_at(e.to_screen(p));
+        assert_eq!(at(&e, [0.0, 0.0]), Hover::ResizeDown);
+        assert_eq!(at(&e, [2000.0, 0.0]), Hover::ResizeUp);
+        assert_eq!(at(&e, [1000.0, 1000.0]), Hover::ResizeY);
+        assert_eq!(at(&e, [0.0, 500.0]), Hover::ResizeX);
+        assert_eq!(at(&e, [1000.0, 500.0]), Hover::Nothing, "the whole image: a drag draws anew");
+        e.image_crop = Some([500.0, 200.0, 800.0, 600.0]);
+        assert_eq!(at(&e, [900.0, 500.0]), Hover::Body, "inside a smaller area: a drag moves it");
+        assert_eq!(at(&e, [100.0, 100.0]), Hover::Nothing);
+        e.finish_crop(true);
+        assert_eq!(e.picture.as_ref().unwrap().rgba.dimensions(), (800, 600));
+    }
+
+    #[test]
+    fn choosing_an_area_keeps_the_image_clear_of_the_bar() {
+        let mut e = editor();
+        e.begin_image_crop();
+        let top = e.to_screen([0.0, 0.0])[1];
+        assert!(top >= CROP_BAR_TOP + CROP_BAR_H + 16.0, "image top at {top}");
+        e.finish_crop(false);
+        assert!(e.to_screen([0.0, 0.0])[1] < CROP_BAR_TOP + CROP_BAR_H, "back to the full view");
+    }
+
+    #[test]
+    fn handles_show_the_way_they_resize() {
+        let mut e = editor();
+        e.add(Kind::Rect, Shape::Rect { x: 100.0, y: 100.0, w: 400.0, h: 200.0 });
+        let at = |e: &Editor, p: [f32; 2]| e.hover_at(e.to_screen(p));
+        assert_eq!(at(&e, [100.0, 100.0]), Hover::ResizeDown);
+        assert_eq!(at(&e, [500.0, 300.0]), Hover::ResizeDown);
+        assert_eq!(at(&e, [500.0, 100.0]), Hover::ResizeUp);
+        assert_eq!(at(&e, [100.0, 300.0]), Hover::ResizeUp);
+        assert_eq!(at(&e, [300.0, 100.0]), Hover::ResizeY);
+        assert_eq!(at(&e, [500.0, 200.0]), Hover::ResizeX);
+        assert_eq!(at(&e, [300.0, 200.0]), Hover::Body);
+    }
+
+    #[test]
+    fn a_cancelled_image_crop_changes_nothing() {
+        let mut e = editor();
+        e.begin_image_crop();
+        e.image_crop = Some([0.0, 0.0, 50.0, 50.0]);
+        e.finish_crop(false);
+        assert_eq!(e.picture.as_ref().unwrap().rgba.dimensions(), (2000, 1000));
+        assert!(!e.can_undo());
     }
 
     #[test]

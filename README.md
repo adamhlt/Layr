@@ -31,6 +31,7 @@ screenshots.
 - Real-world measures from a scale you set once
 - A legend built in one click from the styles on the image
 - Any installed font, colours with opacity, a palette saved between sessions
+- Crop the image, the annotations moving with it
 - Undo, copy and paste, crisp at any zoom
 
 **Stitch**
@@ -55,7 +56,7 @@ or drop them on the window.
 | | |
 | --- | --- |
 | `V` `R` `H` `N` `L` `A` `P` `T` `M` | Select, rectangle, hatch, badge, wire, arrow, dot, text, measure |
-| `G` | Add a legend |
+| `G` · `C` | Add a legend · crop the image |
 | `Ctrl+C` / `Ctrl+V` · `Ctrl+D` | Copy and paste · duplicate |
 | `Ctrl+Z` / `Ctrl+Y` | Undo and redo |
 | `Ctrl+O` · `Ctrl+E` | Open an image or photos to stitch · export |
@@ -63,7 +64,7 @@ or drop them on the window.
 | `Space` + drag, middle or right button | Pan the view |
 | `Shift` | Square boxes, lines at 45° |
 | `Ctrl` + drag a handle | Resize and keep the proportions |
-| `Enter` / `Esc` | Use or cancel the area being selected for export |
+| `Enter` / `Esc` | Use or cancel the area being selected to crop or export |
 
 ## Download
 

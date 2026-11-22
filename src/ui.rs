@@ -10,7 +10,7 @@ use rune::{
 };
 
 use crate::color::{self, ColorTool, Target};
-use crate::editor::{Editor, Hover, PanelTab, Tool, crop_handles};
+use crate::editor::{CROP_BAR_H, CROP_BAR_TOP, Editor, Hover, PanelTab, Tool, crop_handles};
 use crate::measure::Unit;
 use crate::model::{Annotation, BadgeShape, Hatch, Kind, PALETTE, Rgba, Shape as Geo, Style};
 use crate::render::{Area, ExportOptions, Format};
@@ -32,6 +32,28 @@ fn theme() -> tok::Theme {
 
 // ---- Small controls ---------------------------------------------------------------------------
 
+/// How much of itself an unavailable button shows.
+const OFF_OPACITY: f32 = 0.38;
+/// Why most actions are unavailable before an image is open.
+const NO_IMAGE: &str = "Open an image first";
+
+/// The look and press of a button that can or can't be used now.
+fn usable(b: El, enabled: bool) -> El {
+    let t = theme();
+    // `disabled` only tells assistive tech; `inert` is what stops the press, which would
+    // otherwise set state that takes effect once the action becomes available.
+    if enabled { b.focusable(true).hover(t.hover).cursor(Cursor::Pointer) } else { b.disabled(true).opacity(OFF_OPACITY).inert() }
+}
+
+/// Explains an unavailable button: `b` (its press handler already set) passes the pointer
+/// through, so a wrapper around it shows `why` on hover, with a "not allowed" cursor, and
+/// takes the press without acting. `full` stretches the wrapper across its column.
+fn unavailable(b: El, why: Option<&str>, full: bool) -> El {
+    let Some(why) = why else { return b };
+    let w = row().help(why).cursor(Cursor::NotAllowed).child(b);
+    if full { w.w_full() } else { w }
+}
+
 fn button(key: impl Into<String>, label: &str, active: bool, enabled: bool, accent: Color) -> El {
     let t = theme();
     let b = row()
@@ -43,10 +65,8 @@ fn button(key: impl Into<String>, label: &str, active: bool, enabled: bool, acce
         .items_center()
         .radius(6.0)
         .fill(if active { accent } else { t.control_track })
-        .child(text(label).font(type_::LABEL).color(if enabled { t.text } else { t.text_secondary.alpha(0.5) }));
-    // `disabled` only tells assistive tech; `inert` is what stops the press, which would
-    // otherwise set state that takes effect once the action becomes available.
-    if enabled { b.focusable(true).hover(t.hover).cursor(Cursor::Pointer) } else { b.disabled(true).inert() }
+        .child(text(label).font(type_::LABEL).color(t.text));
+    usable(b, enabled)
 }
 
 fn section(title: &str) -> El {
@@ -313,6 +333,19 @@ fn tool_icon(tool: Tool, c: Color) -> El {
     canvas(shape).size(18.0, 18.0)
 }
 
+/// Two overlapping right angles: the crop marks.
+fn crop_icon(c: Color) -> El {
+    let k = |x: f32, y: f32| [x, y];
+    canvas(Shape::new().stroke_with(vec![k(5.0, 1.5), k(5.0, 13.0), k(16.5, 13.0)], false, 1.6, LineCap::Round, c).stroke_with(
+        vec![k(1.5, 5.0), k(13.0, 5.0), k(13.0, 16.5)],
+        false,
+        1.6,
+        LineCap::Round,
+        c,
+    ))
+    .size(18.0, 18.0)
+}
+
 fn legend_icon(c: Color) -> El {
     let k = |x: f32, y: f32| [x, y];
     canvas(
@@ -328,13 +361,7 @@ fn legend_icon(c: Color) -> El {
 
 fn rail_button(key: impl Into<String>, icon: Option<El>, label: &str, hint: &str, active: bool, enabled: bool, accent: Color) -> El {
     let t = theme();
-    let ink = if !enabled {
-        t.text_secondary.alpha(0.5)
-    } else if active {
-        Color::WHITE
-    } else {
-        t.text
-    };
+    let ink = if active { Color::WHITE } else { t.text };
     let mut b = row().key(key).role("button").label(label).w_full().h(32.0).px(8.0).gap(8.0).items_center().radius(6.0).fill(if active {
         accent
     } else {
@@ -347,37 +374,44 @@ fn rail_button(key: impl Into<String>, icon: Option<El>, label: &str, hint: &str
     if !hint.is_empty() {
         b = b.child(text(hint).font(type_::LABEL).color(if active { Color::WHITE.alpha(0.7) } else { t.text_secondary }));
     }
-    // `disabled` only tells assistive tech; `inert` is what stops the press, which would
-    // otherwise set state that takes effect once the action becomes available.
-    if enabled { b.focusable(true).hover(t.hover).cursor(Cursor::Pointer) } else { b.disabled(true).inert() }
+    usable(b, enabled)
 }
 
 fn rail(s: &Editor, accent: Color) -> El {
     let t = theme();
     let has = s.picture.is_some();
+    let no_image = (!has).then_some(NO_IMAGE);
     let sep = || el().w_full().h(1.0).fill(t.separator).my(6.0);
+    let ink = |on: bool| if on { Color::WHITE } else { t.text };
     let mut tools = col().w_full().gap(2.0);
     for (tool, name, key) in Tool::ALL {
-        let on = s.tool == tool;
-        let ink = if !has {
-            t.text_secondary.alpha(0.5)
-        } else if on {
-            Color::WHITE
-        } else {
-            t.text
-        };
-        tools = tools.child(
-            rail_button(format!("tool-{key}"), Some(tool_icon(tool, ink)), name, key, on, has, accent)
+        let on = s.tool == tool && !s.crop_image;
+        tools = tools.child(unavailable(
+            rail_button(format!("tool-{key}"), Some(tool_icon(tool, ink(on))), name, key, on, has, accent)
                 .on_press(move |s: &mut Editor| s.set_tool(tool)),
-        );
+            no_image,
+            true,
+        ));
     }
     let zoom = row()
         .w_full()
         .gap(4.0)
         .items_center()
-        .child(button("zoom-out", "−", false, has, accent).on_press(|s: &mut Editor| s.zoom_center(1.0 / 1.25)))
+        .child(unavailable(
+            button("zoom-out", "−", false, has, accent).on_press(|s: &mut Editor| s.zoom_center(1.0 / 1.25)),
+            no_image,
+            false,
+        ))
         .child(text(format!("{:.0} %", s.zoom * 100.0)).key("zoom").font(type_::LABEL).color(t.text_secondary).grow(1.0).center())
-        .child(button("zoom-in", "+", false, has, accent).on_press(|s: &mut Editor| s.zoom_center(1.25)));
+        .child(unavailable(button("zoom-in", "+", false, has, accent).on_press(|s: &mut Editor| s.zoom_center(1.25)), no_image, false));
+    let crop_why = match () {
+        _ if !has => Some(NO_IMAGE),
+        // The export's own area picking holds the canvas: no image crop meanwhile.
+        _ if s.crop_pick && !s.crop_image => Some("Finish choosing the export area first"),
+        _ => None,
+    };
+    let undo_why = (!s.can_undo()).then_some("Nothing to undo");
+    let redo_why = (!s.can_redo()).then_some("Nothing to redo");
     col()
         .key("rail")
         .w(RAIL_W)
@@ -387,27 +421,43 @@ fn rail(s: &Editor, accent: Color) -> El {
         .gap(2.0)
         .fill(t.card)
         .child(rail_button("open", None, "Open…", "Ctrl+O", false, true, accent).on_press(|s: &mut Editor| s.stitcher.open()))
-        .child(rail_button("export", None, "Export…", "Ctrl+E", false, has, accent).on_press(|s: &mut Editor| s.export_open = true))
+        .child(unavailable(
+            rail_button("export", None, "Export…", "Ctrl+E", false, has, accent).on_press(|s: &mut Editor| s.export_open = true),
+            no_image,
+            true,
+        ))
         .child(sep())
         .child(tools)
-        .child(
-            rail_button(
-                "add-legend",
-                Some(legend_icon(if has { t.text } else { t.text_secondary.alpha(0.5) })),
-                "Legend",
-                "G",
-                false,
-                has,
-                accent,
-            )
-            .on_press(|s: &mut Editor| s.add_legend()),
-        )
+        .child(unavailable(
+            rail_button("crop-image", Some(crop_icon(ink(s.crop_image))), "Crop", "C", s.crop_image, crop_why.is_none(), accent)
+                .on_press(|s: &mut Editor| if s.crop_image { s.finish_crop(false) } else { s.begin_image_crop() }),
+            crop_why,
+            true,
+        ))
+        .child(unavailable(
+            rail_button("add-legend", Some(legend_icon(t.text)), "Legend", "G", false, has, accent)
+                .on_press(|s: &mut Editor| s.add_legend()),
+            no_image,
+            true,
+        ))
         .child(sep())
-        .child(rail_button("undo", None, "Undo", "Ctrl+Z", false, s.can_undo(), accent).on_press(|s: &mut Editor| s.undo()))
-        .child(rail_button("redo", None, "Redo", "Ctrl+Y", false, s.can_redo(), accent).on_press(|s: &mut Editor| s.redo()))
+        .child(unavailable(
+            rail_button("undo", None, "Undo", "Ctrl+Z", false, undo_why.is_none(), accent).on_press(|s: &mut Editor| s.undo()),
+            undo_why,
+            true,
+        ))
+        .child(unavailable(
+            rail_button("redo", None, "Redo", "Ctrl+Y", false, redo_why.is_none(), accent).on_press(|s: &mut Editor| s.redo()),
+            redo_why,
+            true,
+        ))
         .child(spacer())
         .child(zoom)
-        .child(rail_button("fit", None, "Fit", "Ctrl+F", false, has, accent).on_press(|s: &mut Editor| s.fit()))
+        .child(unavailable(
+            rail_button("fit", None, "Fit", "Ctrl+F", false, has, accent).on_press(|s: &mut Editor| s.fit()),
+            no_image,
+            true,
+        ))
 }
 
 // ---- Canvas -----------------------------------------------------------------------------------
@@ -440,14 +490,14 @@ fn selection_overlay(s: &Editor, accent: Color) -> Vec<El> {
     out
 }
 
-/// The export area being chosen: the rest of the image dimmed, the area's outline and
-/// handles, its size, and a bar to finish.
+/// The area being chosen (to export, or to crop the image to): the rest of the image dimmed,
+/// the area's outline and handles, its size, and a bar to finish.
 fn crop_overlay(s: &Editor, accent: Color) -> Vec<El> {
     let t = theme();
     let [_, _, vw, vh] = s.viewport;
     let dim = Color::BLACK.alpha(0.6);
     let mut out = Vec::new();
-    match s.export.custom {
+    match s.crop_area() {
         None => out.push(el().key("crop-dim").absolute(0.0, 0.0).size(vw, vh).fill(dim).inert()),
         Some(r) => {
             let p0 = s.to_screen([r[0], r[1]]);
@@ -478,7 +528,7 @@ fn crop_overlay(s: &Editor, accent: Color) -> Vec<El> {
                         .inert(),
                 );
             }
-            let [_, _, cw, ch] = s.export_rect().unwrap_or_default();
+            let [_, _, cw, ch] = s.crop_area_px().unwrap_or_default();
             let label_y = if p0[1] > 34.0 { p0[1] - 30.0 } else { p0[1] + 8.0 };
             out.push(
                 row()
@@ -494,12 +544,18 @@ fn crop_overlay(s: &Editor, accent: Color) -> Vec<El> {
             );
         }
     }
+    let (hint, done) = if s.crop_image {
+        ("Drag on the image to choose the part to keep.", "Crop")
+    } else {
+        ("Drag on the image to choose the area to export.", "Use this area")
+    };
     let bar_w = 560.0f32.min(vw - 24.0);
     out.push(
         row()
             .key("crop-bar")
-            .absolute(((vw - bar_w) / 2.0).max(12.0), 12.0)
+            .absolute(((vw - bar_w) / 2.0).max(12.0), CROP_BAR_TOP)
             .w(bar_w)
+            .h(CROP_BAR_H)
             .padding(8.0)
             .gap(8.0)
             .items_center()
@@ -507,25 +563,21 @@ fn crop_overlay(s: &Editor, accent: Color) -> Vec<El> {
             .fill(t.card)
             .border(1.0, t.card_border)
             .shadow(8.0, 24.0, Color::BLACK.alpha(0.4))
-            .child(
-                el().grow(1.0)
-                    .min_w(0.0)
-                    .px(6.0)
-                    .child(text("Drag on the image to choose the area to export.").font(type_::LABEL).color(t.text).truncate()),
-            )
+            .child(el().grow(1.0).min_w(0.0).px(6.0).child(text(hint).font(type_::LABEL).color(t.text).truncate()))
             .child(button("crop-cancel", "Cancel", false, true, accent).on_press(|s: &mut Editor| s.finish_crop(false)))
-            .child(
-                button("crop-done", "Use this area", true, s.export.custom.is_some(), accent)
-                    .on_press(|s: &mut Editor| s.finish_crop(true)),
-            ),
+            .child({
+                let why = s.crop_area().is_none().then_some("Drag on the image to choose an area first");
+                unavailable(
+                    button("crop-done", done, true, why.is_none(), accent).on_press(|s: &mut Editor| s.finish_crop(true)),
+                    why,
+                    false,
+                )
+            }),
     );
     out
 }
 
 fn canvas_cursor(s: &Editor) -> Cursor {
-    if s.crop_pick && !s.panning() && !s.space {
-        return Cursor::Crosshair;
-    }
     if s.panning() {
         return Cursor::Grabbing;
     }
@@ -541,6 +593,8 @@ fn canvas_cursor(s: &Editor) -> Cursor {
         Hover::ResizeY => Cursor::ResizeRow,
         Hover::ResizeDown => cursors::resize_down(),
         Hover::ResizeUp => cursors::resize_up(),
+        // Choosing an area, a press anywhere else draws a new one.
+        Hover::Nothing if s.crop_pick => Cursor::Crosshair,
         Hover::Nothing => match s.tool {
             Tool::Select => Cursor::Default,
             Tool::Draw(_) => Cursor::Crosshair,
@@ -583,6 +637,7 @@ fn viewport(s: &Editor, accent: Color) -> El {
     match &s.picture {
         Some(pic) => {
             let (iw, ih) = pic.size();
+            let k = vector::text_boost(s.zoom);
             let world = el()
                 .key("world")
                 .absolute(0.0, 0.0)
@@ -591,7 +646,7 @@ fn viewport(s: &Editor, accent: Color) -> El {
                 .live_offset(&s.live_pan)
                 .live_scale(&s.live_zoom)
                 .pixels(&s.base)
-                .children(s.anns.iter().flat_map(|a| vector::annotation(a, iw, ih, &s.scale)))
+                .children(s.anns.iter().flat_map(|a| vector::annotation(a, iw, ih, &s.scale, k)))
                 .inert();
             v = v.child(world);
             v = if s.crop_pick { v.children(crop_overlay(s, accent)) } else { v.children(selection_overlay(s, accent)) };
@@ -1245,7 +1300,11 @@ fn stitch_view(s: &Editor, accent: Color) -> El {
                         "Drop photos here",
                         row()
                             .gap(8.0)
-                            .child(button("stitch-add", "Add images…", false, !st.picking(), accent).on_press(|s: &mut Editor| s.stitcher.pick_images()))
+                            .child(unavailable(
+                                button("stitch-add", "Add images…", false, !st.picking(), accent).on_press(|s: &mut Editor| s.stitcher.pick_images()),
+                                st.picking().then_some("Already choosing images"),
+                                false,
+                            ))
                             .child(button("stitch-folder", "Add a folder…", false, true, accent).on_press_tx(add_folder)),
                         accent,
                     ))
@@ -1255,7 +1314,12 @@ fn stitch_view(s: &Editor, accent: Color) -> El {
                             .items_center()
                             .child(text(summary).font(type_::LABEL).color(t.text_secondary))
                             .child(spacer())
-                            .child(button("stitch-clear", "Clear", false, !st.paths.is_empty(), accent).on_press(|s: &mut Editor| s.stitcher.paths.clear())),
+                            .child(unavailable(
+                                button("stitch-clear", "Clear", false, !st.paths.is_empty(), accent)
+                                    .on_press(|s: &mut Editor| s.stitcher.paths.clear()),
+                                st.paths.is_empty().then_some("No images to clear"),
+                                false,
+                            )),
                     )
                     .child(list)
                     .child(section("Result"))
@@ -1278,7 +1342,11 @@ fn stitch_view(s: &Editor, accent: Color) -> El {
                             .gap(8.0)
                             .child(spacer())
                             .child(button("stitch-cancel", "Cancel", false, true, accent).on_press(|s: &mut Editor| s.stitcher.close()))
-                            .child(button("stitch-go", "Stitch", true, st.can_start(), accent).on_press(|s: &mut Editor| s.stitcher.start())),
+                            .child(unavailable(
+                                button("stitch-go", "Stitch", true, st.can_start(), accent).on_press(|s: &mut Editor| s.stitcher.start()),
+                                (!st.can_start()).then_some("Add at least two images to stitch"),
+                                false,
+                            )),
                     );
             }
         }
@@ -1458,7 +1526,12 @@ fn color_editor(s: &Editor, tool: &ColorTool, accent: Color) -> El {
                     s.add_to_palette(c);
                 }
             }),
-            button("clear-palette", "Clear my colours", false, !s.palette.is_empty(), accent).on_press(|s: &mut Editor| s.clear_palette()),
+            unavailable(
+                button("clear-palette", "Clear my colours", false, !s.palette.is_empty(), accent)
+                    .on_press(|s: &mut Editor| s.clear_palette()),
+                s.palette.is_empty().then_some("No saved colours to clear"),
+                false,
+            ),
         ))
         .child(
             row()
@@ -1671,6 +1744,7 @@ pub fn on_key(s: &mut Editor, e: &KeyEvent, tx: &mut Tx) -> bool {
             "]" => s.restack(true, false),
             "[" => s.restack(false, false),
             "g" | "G" if s.picture.is_some() => s.add_legend(),
+            "c" | "C" if s.picture.is_some() => s.begin_image_crop(),
             other => match Tool::from_shortcut(other) {
                 Some(tool) if s.picture.is_some() => s.set_tool(tool),
                 _ => return false,
