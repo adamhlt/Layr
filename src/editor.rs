@@ -12,13 +12,17 @@ use crate::render::{self, Area, ExportOptions};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
+    /// Picks an annotation and resizes it by its handles; it doesn't move it.
     Select,
+    /// Moves the annotation under the pointer, without handles.
+    Move,
     Draw(Kind),
 }
 
 impl Tool {
-    pub const ALL: [(Tool, &'static str, &'static str); 9] = [
+    pub const ALL: [(Tool, &'static str, &'static str); 10] = [
         (Tool::Select, "Select", "V"),
+        (Tool::Move, "Move", "W"),
         (Tool::Draw(Kind::Rect), "Rectangle", "R"),
         (Tool::Draw(Kind::Hatch), "Hatch", "H"),
         (Tool::Draw(Kind::Badge), "Badge", "N"),
@@ -55,10 +59,28 @@ impl Picture {
 #[derive(Clone, Debug)]
 enum Gesture {
     None,
-    Pan { start: [f32; 2] },
-    Move { orig: Annotation, start: [f32; 2], changed: bool },
-    Handle { orig: Annotation, handle: Handle, changed: bool },
-    Create { start: [f32; 2] },
+    Pan {
+        start: [f32; 2],
+    },
+    /// Moving the selection: every selected annotation as it was when the move began.
+    Move {
+        origs: Vec<Annotation>,
+        start: [f32; 2],
+        changed: bool,
+    },
+    /// Drawing a selection rectangle from `start` (image pixels); `add` keeps what was selected.
+    Marquee {
+        start: [f32; 2],
+        add: bool,
+    },
+    Handle {
+        orig: Annotation,
+        handle: Handle,
+        changed: bool,
+    },
+    Create {
+        start: [f32; 2],
+    },
 }
 
 /// The properties panel's tabs.
@@ -86,6 +108,8 @@ pub enum Hover {
     ResizeUp,
     /// Over a point handle (a wire vertex, an arrow end).
     Point,
+    /// Over an annotation the select tool would pick (and move if dragged).
+    Pick,
 }
 
 /// Handle grab radius, in screen points.
@@ -120,6 +144,17 @@ pub fn crop_handles(r: [f32; 4]) -> [[f32; 2]; 8] {
 struct Snapshot {
     anns: Vec<Annotation>,
     image: Option<(image::RgbaImage, [u32; 4])>,
+}
+
+/// Whether two `[x, y, w, h]` rectangles touch.
+fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
+    a[0] <= b[0] + b[2] && b[0] <= a[0] + a[2] && a[1] <= b[1] + b[3] && b[1] <= a[1] + a[3]
+}
+
+/// The smallest `[x, y, w, h]` rectangle holding both.
+fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let (x, y) = (a[0].min(b[0]), a[1].min(b[1]));
+    [x, y, (a[0] + a[2]).max(b[0] + b[2]) - x, (a[1] + a[3]).max(b[1] + b[3]) - y]
 }
 
 /// The cursor's look over handle `i` of `a` (see [`Annotation::handles`] for the order).
@@ -171,6 +206,14 @@ pub struct Editor {
     pub hover: Hover,
     /// A right-button pan: where the pointer and the camera were when it began.
     right_pan: Option<([f32; 2], [f32; 2])>,
+    /// The other selected annotations, besides `selected` (the one the panel edits).
+    group: Vec<u64>,
+    /// The selection rectangle being drawn with the select tool, `[x, y, w, h]` in image pixels.
+    pub marquee: Option<[f32; 4]>,
+    /// Whether the right-button pan went anywhere: then its release opens no context menu.
+    right_moved: bool,
+    /// The context menu, open at this viewport point.
+    pub context_menu: Option<[f32; 2]>,
 
     /// The text field editing the selected caption or label.
     pub caption: TextEdit,
@@ -244,6 +287,10 @@ impl Editor {
             space: false,
             hover: Hover::Nothing,
             right_pan: None,
+            right_moved: false,
+            group: Vec::new(),
+            marquee: None,
+            context_menu: None,
             caption: TextEdit::new(""),
             caption_for: None,
             caption_pushed: false,
@@ -310,7 +357,7 @@ impl Editor {
         self.anns.clear();
         self.undo.clear();
         self.redo.clear();
-        self.selected = None;
+        self.select(None);
         self.drawing_wire = None;
         self.next_id = 1;
         self.dirty = true;
@@ -360,7 +407,7 @@ impl Editor {
         }
         let (w, h) = pic.size();
         self.finish_wire();
-        self.selected = None;
+        self.select(None);
         self.hover = Hover::Nothing;
         (self.crop_pick, self.crop_image, self.image_crop, self.export_open) = (true, true, Some([0.0, 0.0, w, h]), false);
         self.fit();
@@ -669,8 +716,10 @@ impl Editor {
     }
 
     fn after_history(&mut self) {
+        let anns = &self.anns;
+        self.group.retain(|id| anns.iter().any(|a| a.id == *id));
         if self.selected.is_some_and(|id| self.get(id).is_none()) {
-            self.selected = None;
+            self.select(None);
         }
         self.caption_for = None;
         self.dirty = true;
@@ -688,6 +737,35 @@ impl Editor {
 
     pub fn selection(&self) -> Option<&Annotation> {
         self.selected.and_then(|id| self.get(id))
+    }
+
+    /// Selects `id` alone (or nothing).
+    pub fn select(&mut self, id: Option<u64>) {
+        self.selected = id;
+        self.group.clear();
+    }
+
+    /// Every selected annotation's id, the panel's one first.
+    pub fn picked(&self) -> Vec<u64> {
+        self.selected.into_iter().chain(self.group.iter().copied()).filter(|id| self.get(*id).is_some()).collect()
+    }
+
+    /// Selects `ids`, the first one in the panel.
+    fn select_all(&mut self, ids: Vec<u64>) {
+        let mut ids = ids.into_iter();
+        self.selected = ids.next();
+        self.group = ids.collect();
+    }
+
+    /// Adds `id` to the selection, or takes it out if it is in it.
+    fn toggle_picked(&mut self, id: u64) {
+        let mut ids = self.picked();
+        if let Some(i) = ids.iter().position(|x| *x == id) {
+            ids.remove(i);
+        } else {
+            ids.push(id);
+        }
+        self.select_all(ids);
     }
 
     pub fn unit(&self) -> f32 {
@@ -708,82 +786,118 @@ impl Editor {
         };
         let style: Style = kind.default_style().scaled(self.unit());
         self.anns.push(Annotation { id, kind, shape, style, text, legend: Vec::new() });
-        self.selected = Some(id);
+        self.select(Some(id));
         self.dirty = true;
         id
     }
 
-    /// Applies `f` to the selected annotation's style, as one undoable step.
-    pub fn edit_style(&mut self, f: impl FnOnce(&mut Style)) {
-        let Some(id) = self.selected else { return };
+    /// Applies `f` to every selected annotation's style, as one undoable step.
+    pub fn edit_style(&mut self, f: impl Fn(&mut Style)) {
+        let ids = self.picked();
+        if ids.is_empty() {
+            return;
+        }
         self.push_history();
-        if let Some(a) = self.get_mut(id) {
+        for a in self.anns.iter_mut().filter(|a| ids.contains(&a.id)) {
             f(&mut a.style);
         }
         self.dirty = true;
     }
 
     /// A slider moved: `start` opens one undo step for the whole drag.
-    pub fn slide_style(&mut self, start: bool, f: impl FnOnce(&mut Style)) {
-        let Some(id) = self.selected else { return };
+    pub fn slide_style(&mut self, start: bool, f: impl Fn(&mut Style)) {
+        let ids = self.picked();
+        if ids.is_empty() {
+            return;
+        }
         if start {
             self.push_history();
         }
-        if let Some(a) = self.get_mut(id) {
+        for a in self.anns.iter_mut().filter(|a| ids.contains(&a.id)) {
             f(&mut a.style);
         }
         self.dirty = true;
     }
 
     pub fn delete_selected(&mut self) {
-        let Some(id) = self.selected else { return };
-        if self.drawing_wire == Some(id) {
+        let ids = self.picked();
+        if ids.is_empty() {
+            return;
+        }
+        if self.drawing_wire.is_some_and(|w| ids.contains(&w)) {
             self.drawing_wire = None;
         }
         self.push_history();
-        self.anns.retain(|a| a.id != id);
-        self.selected = None;
+        self.anns.retain(|a| !ids.contains(&a.id));
+        self.select(None);
         self.dirty = true;
     }
 
     pub fn duplicate_selected(&mut self) {
-        let Some(a) = self.selection().cloned() else { return };
-        self.push_history();
-        let off = 20.0 * self.unit();
-        let id = self.next_id;
-        self.next_id += 1;
-        let mut copy = Annotation { id, shape: a.translated(off, off), ..a };
-        if copy.kind == Kind::Badge {
-            copy.text = self.next_badge_number().to_string();
-        }
-        self.anns.push(copy);
-        self.selected = Some(id);
-        self.dirty = true;
-    }
-
-    /// Moves the selection in the stacking order: `to_end` sends it all the way.
-    pub fn restack(&mut self, forward: bool, to_end: bool) {
-        let Some(id) = self.selected else { return };
-        let Some(i) = self.anns.iter().position(|a| a.id == id) else { return };
-        let j = match (forward, to_end) {
-            (true, true) => self.anns.len() - 1,
-            (true, false) => (i + 1).min(self.anns.len() - 1),
-            (false, true) => 0,
-            (false, false) => i.saturating_sub(1),
-        };
-        if i == j {
+        let ids = self.picked();
+        if ids.is_empty() {
             return;
         }
         self.push_history();
-        let a = self.anns.remove(i);
-        self.anns.insert(j, a);
+        let off = 20.0 * self.unit();
+        let mut copies = Vec::new();
+        for src in ids {
+            let Some(a) = self.get(src).cloned() else { continue };
+            let id = self.next_id;
+            self.next_id += 1;
+            let mut copy = Annotation { id, shape: a.translated(off, off), ..a };
+            if copy.kind == Kind::Badge {
+                copy.text = self.next_badge_number().to_string();
+            }
+            self.anns.push(copy);
+            copies.push(id);
+        }
+        self.select_all(copies);
+        self.dirty = true;
+    }
+
+    /// Moves the selection in the stacking order, keeping its own order: `to_end` sends it all
+    /// the way.
+    pub fn restack(&mut self, forward: bool, to_end: bool) {
+        let ids = self.picked();
+        if ids.is_empty() {
+            return;
+        }
+        let mut order: Vec<u64> = self.anns.iter().map(|a| a.id).collect();
+        let before = order.clone();
+        if to_end {
+            let (picked, rest): (Vec<u64>, Vec<u64>) = order.into_iter().partition(|id| ids.contains(id));
+            order = if forward { rest.into_iter().chain(picked).collect() } else { picked.into_iter().chain(rest).collect() };
+        } else if forward {
+            // One step up: from the top down, each selected one swaps with an unselected one above.
+            for i in (0..order.len().saturating_sub(1)).rev() {
+                if ids.contains(&order[i]) && !ids.contains(&order[i + 1]) {
+                    order.swap(i, i + 1);
+                }
+            }
+        } else {
+            for i in 1..order.len() {
+                if ids.contains(&order[i]) && !ids.contains(&order[i - 1]) {
+                    order.swap(i, i - 1);
+                }
+            }
+        }
+        if order == before {
+            return;
+        }
+        self.push_history();
+        let mut anns = std::mem::take(&mut self.anns);
+        self.anns = order.iter().filter_map(|id| anns.iter().position(|a| a.id == *id).map(|i| anns.swap_remove(i))).collect();
         self.dirty = true;
     }
 
     pub fn nudge(&mut self, dx: f32, dy: f32) {
-        let Some(id) = self.selected else { return };
+        let ids = self.picked();
+        if ids.is_empty() {
+            return;
+        }
         self.push_history();
-        if let Some(a) = self.get_mut(id) {
+        for a in self.anns.iter_mut().filter(|a| ids.contains(&a.id)) {
             a.shape = a.translated(dx, dy);
         }
         self.dirty = true;
@@ -811,7 +925,7 @@ impl Editor {
             self.anns.retain(|a| a.id != id);
             self.drop_last_history();
             if self.selected == Some(id) {
-                self.selected = None;
+                self.select(None);
             }
         }
         self.dirty = true;
@@ -822,7 +936,7 @@ impl Editor {
         if self.drawing_wire.is_some() {
             self.finish_wire();
         } else if self.selected.is_some() {
-            self.selected = None;
+            self.select(None);
         } else {
             self.tool = Tool::Select;
         }
@@ -850,7 +964,7 @@ impl Editor {
         let h = crate::legend::layout(&a).frame[3];
         a.shape = Shape::Text { pos: [margin, (ih - margin - h).max(0.0)] };
         self.anns.push(a);
-        self.selected = Some(id);
+        self.select(Some(id));
         self.tool = Tool::Select;
         self.panel_tab = PanelTab::Text;
         self.dirty = true;
@@ -962,6 +1076,14 @@ impl Editor {
 
     /// The selection's handle under viewport point `q`.
     fn handle_at(&self, q: [f32; 2]) -> Option<(Annotation, Handle)> {
+        // The move tool shows no handles.
+        if self.tool == Tool::Move {
+            return None;
+        }
+        // Several selected annotations show outlines, not handles.
+        if !self.group.is_empty() {
+            return None;
+        }
         let a = self.selection()?;
         a.handles().iter().enumerate().find_map(|(i, h)| {
             let s = self.to_screen(*h);
@@ -987,7 +1109,7 @@ impl Editor {
         }
         if d.phase == Phase::Down {
             let pan = self.space || tx.button() == PointerButton::Middle;
-            self.press(q, p, d.clicks, pan);
+            self.press(q, p, d.clicks, pan, shift);
             self.hover = self.hover_at(q);
             return;
         }
@@ -998,14 +1120,16 @@ impl Editor {
                 }
             }
             Gesture::Pan { start } => self.set_camera([start[0] + d.dx, start[1] + d.dy], self.zoom),
-            Gesture::Move { orig, start, .. } => {
+            Gesture::Move { origs, start, .. } => {
                 let (mut dx, mut dy) = (p[0] - start[0], p[1] - start[1]);
                 if shift {
                     if dx.abs() > dy.abs() { dy = 0.0 } else { dx = 0.0 }
                 }
                 let moved = dx != 0.0 || dy != 0.0;
-                if let Some(a) = self.get_mut(orig.id) {
-                    a.shape = orig.translated(dx, dy);
+                for orig in &origs {
+                    if let Some(a) = self.get_mut(orig.id) {
+                        a.shape = orig.translated(dx, dy);
+                    }
                 }
                 if let Gesture::Move { changed, .. } = &mut self.gesture {
                     *changed |= moved;
@@ -1022,6 +1146,10 @@ impl Editor {
                 self.dirty = true;
             }
             Gesture::Create { start } => self.drag_create(start, p, shift),
+            Gesture::Marquee { start, .. } => {
+                self.marquee = Some([start[0].min(p[0]), start[1].min(p[1]), (p[0] - start[0]).abs(), (p[1] - start[1]).abs()]);
+                self.dirty = true;
+            }
         }
         if d.phase == Phase::Up {
             self.release(d.cancelled());
@@ -1030,26 +1158,50 @@ impl Editor {
         self.hover = self.hover_at(q);
     }
 
-    fn press(&mut self, q: [f32; 2], p: [f32; 2], clicks: u32, pan: bool) {
+    /// Takes hold of annotation `id` at `p` to move it. A selected one moves the whole
+    /// selection (and comes first, into the panel); another one is selected alone.
+    fn grab(&mut self, id: u64, p: [f32; 2]) {
+        let mut ids = self.picked();
+        match ids.iter().position(|x| *x == id) {
+            Some(i) => {
+                ids.remove(i);
+                ids.insert(0, id);
+                self.select_all(ids);
+            }
+            None => self.select(Some(id)),
+        }
+        let origs = self.picked().iter().filter_map(|id| self.get(*id).cloned()).collect();
+        self.push_history();
+        self.gesture = Gesture::Move { origs, start: p, changed: false };
+    }
+
+    /// A press on the canvas. `add` (Shift) adds to the selection rather than replacing it.
+    fn press(&mut self, q: [f32; 2], p: [f32; 2], clicks: u32, pan: bool, add: bool) {
         if pan || self.picture.is_none() {
             self.gesture = Gesture::Pan { start: self.pan };
             return;
         }
         match self.tool {
             Tool::Select => {
-                if let Some((orig, handle)) = self.handle_at(q) {
+                if let Some((orig, handle)) = self.handle_at(q).filter(|_| !add) {
                     self.push_history();
                     self.gesture = Gesture::Handle { orig, handle, changed: false };
                 } else if let Some(id) = self.hit(p) {
-                    self.selected = Some(id);
-                    let orig = self.get(id).cloned().expect("hit annotation exists");
-                    self.push_history();
-                    self.gesture = Gesture::Move { orig, start: p, changed: false };
+                    // Shift adds or takes out; otherwise the press selects and a drag moves.
+                    if add { self.toggle_picked(id) } else { self.grab(id, p) }
                 } else {
-                    self.selected = None;
-                    self.gesture = Gesture::Pan { start: self.pan };
+                    // Elsewhere a drag draws a selection rectangle.
+                    if !add {
+                        self.select(None);
+                    }
+                    self.marquee = None;
+                    self.gesture = Gesture::Marquee { start: p, add };
                 }
             }
+            Tool::Move => match self.hit(p) {
+                Some(id) => self.grab(id, p),
+                None => self.gesture = Gesture::Pan { start: self.pan },
+            },
             Tool::Draw(Kind::Wire) => {
                 if let Some(id) = self.drawing_wire {
                     if clicks >= 2 {
@@ -1131,7 +1283,7 @@ impl Editor {
                     }
                     Shape::Arrow { from, to } if (from[0] - to[0]).hypot(from[1] - to[1]) < min => {
                         self.anns.retain(|a| a.id != id);
-                        self.selected = None;
+                        self.select(None);
                         self.drop_last_history();
                     }
                     _ => {}
@@ -1141,6 +1293,16 @@ impl Editor {
                     self.caption_for = None;
                     self.focus_caption = true;
                     self.panel_tab = PanelTab::Text;
+                }
+                self.dirty = true;
+            }
+            Gesture::Marquee { add, .. } => {
+                if let Some(r) = self.marquee.take() {
+                    // What the rectangle touches, in stacking order.
+                    let hits: Vec<u64> = self.anns.iter().filter(|a| overlaps(a.bounds(), r)).map(|a| a.id).collect();
+                    let mut ids = if add { self.picked() } else { Vec::new() };
+                    ids.extend(hits.into_iter().filter(|id| !ids.contains(id)).collect::<Vec<_>>());
+                    self.select_all(ids);
                 }
                 self.dirty = true;
             }
@@ -1175,8 +1337,10 @@ impl Editor {
         match (right && self.tool != Tool::Select && self.picture.is_some(), self.right_pan) {
             (true, None) => {
                 self.right_pan = Some((q, self.pan));
+                self.right_moved = false;
             }
             (true, Some((at, start))) => {
+                self.right_moved |= (q[0] - at[0]).hypot(q[1] - at[1]) > 3.0;
                 self.set_camera([start[0] + q[0] - at[0], start[1] + q[1] - at[1]], self.zoom);
                 return;
             }
@@ -1202,11 +1366,36 @@ impl Editor {
     }
 
     pub fn copy(&mut self) {
-        if let Some(a) = self.selection().cloned() {
-            self.clipboard = vec![a];
+        let ids = self.picked();
+        if !ids.is_empty() {
+            self.clipboard = self.anns.iter().filter(|a| ids.contains(&a.id)).cloned().collect();
             self.pastes = 0;
             self.status = "Copied".into();
         }
+    }
+
+    /// Copies the selection, then deletes it.
+    pub fn cut(&mut self) {
+        if self.selection().is_some() {
+            self.copy();
+            self.delete_selected();
+            self.status = "Cut".into();
+        }
+    }
+
+    /// A right-click on the canvas at viewport point `q`: selects what is there and opens the
+    /// context menu, unless the right button panned the view.
+    pub fn open_context_menu(&mut self, q: [f32; 2]) {
+        if std::mem::take(&mut self.right_moved) || self.picture.is_none() || self.crop_pick {
+            return;
+        }
+        self.finish_wire();
+        if let Some(id) = self.hit(self.to_image(q))
+            && !self.picked().contains(&id)
+        {
+            self.select(Some(id));
+        }
+        self.context_menu = Some(q);
     }
 
     /// Pastes the clipboard centred on `at` (image pixels), else under the pointer, else
@@ -1219,13 +1408,14 @@ impl Editor {
         self.push_history();
         self.pastes += 1;
         let step = 20.0 * self.unit() * self.pastes as f32;
-        let mut last = None;
+        // Several annotations move together, keeping their layout: their bounds are centred.
+        let [x, y, w, h] = self.clipboard.iter().map(Annotation::bounds).reduce(union).unwrap_or_default();
+        let (dx, dy) = match at.or(self.pointer) {
+            Some(p) => (p[0] - (x + w / 2.0), p[1] - (y + h / 2.0)),
+            None => (step, step),
+        };
+        let mut pasted = Vec::new();
         for a in self.clipboard.clone() {
-            let [x, y, w, h] = a.bounds();
-            let (dx, dy) = match at.or(self.pointer) {
-                Some(p) => (p[0] - (x + w / 2.0), p[1] - (y + h / 2.0)),
-                None => (step, step),
-            };
             let id = self.next_id;
             self.next_id += 1;
             let mut copy = Annotation { id, shape: a.translated(dx, dy), ..a };
@@ -1233,9 +1423,9 @@ impl Editor {
                 copy.text = self.next_badge_number().to_string();
             }
             self.anns.push(copy);
-            last = Some(id);
+            pasted.push(id);
         }
-        self.selected = last;
+        self.select_all(pasted);
         self.tool = Tool::Select;
         self.status = "Pasted".into();
         self.dirty = true;
@@ -1283,8 +1473,12 @@ impl Editor {
         if let Some((a, i)) = self.handle_at(q) {
             return handle_hover(&a, i);
         }
-        if self.tool == Tool::Select && self.hit(self.to_image(q)).is_some() {
-            return Hover::Body;
+        if self.hit(self.to_image(q)).is_some() {
+            match self.tool {
+                Tool::Select => return Hover::Pick,
+                Tool::Move => return Hover::Body,
+                Tool::Draw(_) => {}
+            }
         }
         Hover::Nothing
     }
@@ -1446,7 +1640,130 @@ mod tests {
         assert_eq!(at(&e, [100.0, 300.0]), Hover::ResizeUp);
         assert_eq!(at(&e, [300.0, 100.0]), Hover::ResizeY);
         assert_eq!(at(&e, [500.0, 200.0]), Hover::ResizeX);
-        assert_eq!(at(&e, [300.0, 200.0]), Hover::Body);
+        assert_eq!(at(&e, [300.0, 200.0]), Hover::Pick, "the select tool picks");
+        e.set_tool(Tool::Move);
+        assert_eq!(at(&e, [300.0, 200.0]), Hover::Body, "the move tool does");
+        assert_eq!(at(&e, [100.0, 100.0]), Hover::Body, "and shows no handles");
+    }
+
+    #[test]
+    fn select_and_move_both_move() {
+        let mut e = editor();
+        let id = e.add(Kind::Rect, Shape::Rect { x: 100.0, y: 100.0, w: 400.0, h: 200.0 });
+        e.selected = None;
+        let (p, q) = ([300.0, 200.0], e.to_screen([300.0, 200.0]));
+        e.press(q, p, 1, false, false);
+        assert_eq!(e.selected, Some(id), "a press selects");
+        assert!(e.moving(), "and a drag would move it");
+        e.release(false);
+        e.selected = None;
+        e.set_tool(Tool::Move);
+        e.press(q, p, 1, false, false);
+        assert_eq!(e.selected, Some(id));
+        assert!(e.moving(), "the move tool takes hold of it");
+        e.release(false);
+        assert!(e.handle_at(e.to_screen([100.0, 100.0])).is_none(), "no handles to resize with");
+    }
+
+    /// Three boxes side by side, nothing selected.
+    fn three_boxes() -> (Editor, [u64; 3]) {
+        let mut e = editor();
+        let ids = [100.0, 400.0, 700.0].map(|x| e.add(Kind::Rect, Shape::Rect { x, y: 100.0, w: 100.0, h: 100.0 }));
+        e.select(None);
+        (e, ids)
+    }
+
+    /// A select-tool drag from `a` to `b` (image pixels).
+    fn marquee(e: &mut Editor, a: [f32; 2], b: [f32; 2], add: bool) {
+        e.press(e.to_screen(a), a, 1, false, add);
+        if let Gesture::Marquee { start, .. } = e.gesture {
+            e.marquee = Some([start[0].min(b[0]), start[1].min(b[1]), (b[0] - start[0]).abs(), (b[1] - start[1]).abs()]);
+        }
+        e.release(false);
+    }
+
+    #[test]
+    fn a_selection_rectangle_picks_what_it_touches() {
+        let (mut e, [a, b, c]) = three_boxes();
+        marquee(&mut e, [50.0, 50.0], [450.0, 150.0], false);
+        assert_eq!(e.picked(), vec![a, b], "the first two, the third untouched");
+        assert!(e.marquee.is_none(), "the rectangle goes away");
+        marquee(&mut e, [650.0, 50.0], [750.0, 150.0], true);
+        assert_eq!(e.picked(), vec![a, b, c], "Shift adds to the selection");
+        marquee(&mut e, [0.0, 600.0], [10.0, 610.0], false);
+        assert!(e.picked().is_empty(), "an empty rectangle selects nothing");
+    }
+
+    #[test]
+    fn shift_click_adds_and_takes_out() {
+        let (mut e, [a, b, _]) = three_boxes();
+        for (x, add) in [(150.0, false), (450.0, true)] {
+            e.press(e.to_screen([x, 150.0]), [x, 150.0], 1, false, add);
+            e.release(false);
+        }
+        assert_eq!(e.picked(), vec![a, b]);
+        e.press(e.to_screen([150.0, 150.0]), [150.0, 150.0], 1, false, true);
+        assert_eq!(e.picked(), vec![b]);
+    }
+
+    #[test]
+    fn several_selected_move_delete_and_copy_together() {
+        let (mut e, [a, b, c]) = three_boxes();
+        marquee(&mut e, [50.0, 50.0], [450.0, 150.0], false);
+        assert!(e.handle_at(e.to_screen([100.0, 100.0])).is_none(), "a group shows no handles");
+        e.nudge(10.0, 0.0);
+        assert_eq!(e.get(a).unwrap().bounds()[0], 110.0);
+        assert_eq!(e.get(b).unwrap().bounds()[0], 410.0);
+        assert_eq!(e.get(c).unwrap().bounds()[0], 700.0, "the unselected one stays");
+        e.edit_style(|st| st.stroke_width = 9.0);
+        assert!(e.get(a).unwrap().style.stroke_width == 9.0 && e.get(b).unwrap().style.stroke_width == 9.0);
+        e.copy();
+        e.paste(Some([1000.0, 800.0]));
+        let pasted: Vec<_> = e.picked().iter().map(|id| e.get(*id).unwrap().bounds()).collect();
+        assert_eq!(pasted.len(), 2, "both pasted, both selected");
+        assert_eq!(pasted[1][0] - pasted[0][0], 300.0, "keeping their layout");
+        e.delete_selected();
+        assert_eq!(e.anns.len(), 3);
+    }
+
+    #[test]
+    fn several_selected_restack_in_their_order() {
+        let (mut e, [a, b, c]) = three_boxes();
+        e.select_all(vec![a, b]);
+        e.restack(true, true);
+        assert_eq!(e.anns.iter().map(|x| x.id).collect::<Vec<_>>(), vec![c, a, b]);
+        e.restack(false, false);
+        assert_eq!(e.anns.iter().map(|x| x.id).collect::<Vec<_>>(), vec![a, b, c]);
+    }
+
+    #[test]
+    fn cut_copies_then_deletes() {
+        let mut e = editor();
+        e.add(Kind::Rect, Shape::Rect { x: 100.0, y: 100.0, w: 40.0, h: 20.0 });
+        e.cut();
+        assert!(e.anns.is_empty() && e.selected.is_none());
+        assert!(e.can_paste());
+        e.paste(Some([500.0, 500.0]));
+        assert_eq!(e.anns.len(), 1);
+        assert_eq!(e.anns[0].bounds(), [480.0, 490.0, 40.0, 20.0], "pasted centred on the point");
+    }
+
+    #[test]
+    fn a_right_click_opens_the_menu_on_what_it_hits() {
+        let mut e = editor();
+        let id = e.add(Kind::Rect, Shape::Rect { x: 100.0, y: 100.0, w: 400.0, h: 200.0 });
+        e.selected = None;
+        let q = e.to_screen([300.0, 200.0]);
+        e.open_context_menu(q);
+        assert_eq!(e.context_menu, Some(q));
+        assert_eq!(e.selected, Some(id), "what was right-clicked is selected");
+        // A right-button pan that went somewhere opens nothing when the button comes up.
+        e.context_menu = None;
+        e.set_tool(Tool::Draw(Kind::Rect));
+        e.pointer_moved([10.0, 10.0], false, true);
+        e.pointer_moved([60.0, 40.0], false, true);
+        e.open_context_menu([60.0, 40.0]);
+        assert_eq!(e.context_menu, None);
     }
 
     #[test]

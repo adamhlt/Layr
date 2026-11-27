@@ -55,13 +55,16 @@ or drop them on the window.
 
 | | |
 | --- | --- |
-| `V` `R` `H` `N` `L` `A` `P` `T` `M` | Select, rectangle, hatch, badge, wire, arrow, dot, text, measure |
+| `V` · `W` | Select, move and resize · move only (no handles, a drag elsewhere pans) |
+| Drag with `V` · `Shift` + click | Select several with a rectangle · add to or take out of the selection |
+| `R` `H` `N` `L` `A` `P` `T` `M` | Rectangle, hatch, badge, wire, arrow, dot, text, measure |
 | `G` · `C` | Add a legend · crop the image |
-| `Ctrl+C` / `Ctrl+V` · `Ctrl+D` | Copy and paste · duplicate |
+| `Ctrl+X` / `Ctrl+C` / `Ctrl+V` · `Ctrl+D` | Cut, copy and paste · duplicate |
+| Right click | Cut, copy, paste, duplicate, stacking order and delete |
 | `Ctrl+Z` / `Ctrl+Y` | Undo and redo |
 | `Ctrl+O` · `Ctrl+E` | Open an image or photos to stitch · export |
 | `Ctrl+F` · wheel | Fit to window · zoom |
-| `Space` + drag, middle or right button | Pan the view |
+| `Space` + drag, middle or right button | Pan the view (a right click without dragging opens the menu) |
 | `Shift` | Square boxes, lines at 45° |
 | `Ctrl` + drag a handle | Resize and keep the proportions |
 | `Enter` / `Esc` | Use or cancel the area being selected to crop or export |
@@ -85,6 +88,8 @@ cargo run --release
 
 - **Toolchain**: `rust-toolchain.toml` pins the Rust version; rustup installs it on first use.
 - **Linux**: needs `libxkbcommon-dev` and `libwayland-dev`.
+- **Theme**: the interface uses the Basalt design system, vendored as the `rune-basalt` crate in
+  `vendor/rune-basalt` (see its README to update it).
 - **Release**: pushing a `v*` tag builds all three platforms into one GitHub release.
 
 ## Use of AI
@@ -94,6 +99,6 @@ AI assistance was used in this project, for code, tests and documentation. The a
 ## License
 
 Layr is free software under the [GNU General Public License v3.0](LICENSE) or any later version.
-The bundled Inter typeface is under the SIL Open Font License.
+The bundled Inter, Space Grotesk, JetBrains Mono and IBM Plex Sans typefaces are under the SIL Open Font License.
 
 <div align="center"><sub>Built with <a href="https://github.com/anomalyco/rune">Rune</a></sub></div>

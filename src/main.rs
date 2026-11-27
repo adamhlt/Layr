@@ -34,7 +34,24 @@ fn init() -> Editor {
     e
 }
 
+/// Registers the interface faces (Basalt's Space Grotesk and JetBrains Mono, and IBM Plex Sans
+/// for the rail's captions) beside Rune's built-in Inter, once. `AppSpec::fonts` would replace
+/// Inter, which annotations are drawn and exported in.
+fn add_ui_fonts(tx: &mut rune::Tx) -> bool {
+    static ADDED: std::sync::Once = std::sync::Once::new();
+    let mut first = false;
+    ADDED.call_once(|| {
+        for face in rune_basalt::FONTS {
+            tx.add_font(*face);
+        }
+        tx.add_font(include_bytes!("../assets/IBMPlexSans-Variable.ttf").as_slice());
+        first = true;
+    });
+    first
+}
+
 fn poll(s: &mut Editor, _: f64, tx: &mut rune::Tx) -> bool {
+    let fonts = add_ui_fonts(tx);
     let updated = s.updater.poll(tx);
     if let Some(note) = s.updater.notice.take() {
         s.status = note;
@@ -46,7 +63,7 @@ fn poll(s: &mut Editor, _: f64, tx: &mut rune::Tx) -> bool {
     if let Some(note) = s.stitcher.notice.take() {
         s.status = note;
     }
-    s.refresh() | updated | stitching
+    s.refresh() | updated | stitching | fonts
 }
 
 fn main() {
@@ -72,5 +89,9 @@ fn main() {
     // macOS: a standard titled window. Rune's default draws the content under a transparent
     // titlebar, so the traffic lights and the titlebar band would cover the top of the view.
     // Windows and Linux keep their native frame either way.
-    rune::App::new(spec).chrome(rune::Chrome { full_size_content: false, ..rune::Chrome::DEFAULT }).run();
+    // The interface is Basalt's dark theme: the native frame follows it.
+    rune::App::new(spec)
+        .chrome(rune::Chrome { full_size_content: false, ..rune::Chrome::DEFAULT })
+        .color_scheme(rune::ColorScheme::Dark)
+        .run();
 }
