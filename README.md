@@ -21,7 +21,7 @@ over photos, then exporting the result in full resolution. It can also stitch ov
 into one large image first. It's made for repair notes, technical documentation and annotated
 screenshots.
 
-<p align="center"><img src="https://github.com/user-attachments/assets/9c1cc5c6-0a8c-489a-92fc-8e3c99c5ef7c" width="960" alt="Layr annotating an Intel 8086 die photo: boxes, hatching, numbered badges, a legend, then choosing an area to export"></p>
+<p align="center"><img src="https://github.com/user-attachments/assets/b794d936-25dc-439b-be6f-5ce53dfc0c05" width="960" alt="Layr annotating an Intel 8086 die photo: boxes, hatching, numbered badges, a legend, then choosing an area to export"></p>
 
 ## Features
 
