@@ -53,8 +53,8 @@ Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "..\..\assets\Inter-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\assets\IBMPlexSans-OFL.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\..\vendor\rune-basalt\assets\fonts\SpaceGrotesk-OFL.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\..\vendor\rune-basalt\assets\fonts\JetBrainsMono-OFL.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\vendor\basalt\themes\basalt\assets\fonts\SpaceGrotesk-OFL.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\vendor\basalt\themes\basalt\assets\fonts\JetBrainsMono-OFL.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Layr"; Filename: "{app}\layr.exe"

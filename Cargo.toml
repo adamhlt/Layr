@@ -7,10 +7,10 @@ description = "Annotate images with overlays: boxes, hatched zones, wires, arrow
 
 [workspace]
 resolver = "3"
-members = ["vendor/rune-basalt"]
+members = ["vendor/basalt/themes/basalt"]
 
 # Rune is pre-release: pin one `dev` revision for every crate that uses it (Layr and its
-# vendored Basalt theme), and patch the crates Rune's root Cargo.toml patches at that same
+# Basalt theme, a git submodule), and patch the crates Rune's root Cargo.toml patches at that same
 # revision (Cargo doesn't inherit patches from a dependency).
 [workspace.dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "4918969f04dce020f63b34e024368a86e5e1857d", default-features = false }
@@ -24,7 +24,8 @@ path = "src/main.rs"
 [dependencies]
 rune = { workspace = true, default-features = true, features = ["native-file-dialog"] }
 rune-kit = { workspace = true, default-features = true }
-rune-basalt = { path = "vendor/rune-basalt" }
+# The Basalt theme: the `rune-basalt` crate of the Rune-Basalt submodule.
+rune-basalt = { path = "vendor/basalt/themes/basalt" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 tiny-skia = "0.11"
 ab_glyph = "0.2"

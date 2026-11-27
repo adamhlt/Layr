@@ -12,6 +12,7 @@ on:
       - "rust-toolchain.toml"
       - "rustfmt.toml"
       - "vendor/**"
+      - ".gitmodules"
       - ".github/workflows/ci.yml"
   pull_request:
     paths:
@@ -23,6 +24,7 @@ on:
       - "rust-toolchain.toml"
       - "rustfmt.toml"
       - "vendor/**"
+      - ".gitmodules"
       - ".github/workflows/ci.yml"
 
 env:
@@ -38,6 +40,9 @@ jobs:
         os: [windows-latest, ubuntu-22.04, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The Basalt theme is a submodule (vendor/basalt).
+          submodules: true
       - name: Rust toolchain
         shell: bash
         run: rustup show active-toolchain || rustup toolchain install

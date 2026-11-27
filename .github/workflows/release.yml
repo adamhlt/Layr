@@ -41,6 +41,8 @@ jobs:
         with:
           # A hand-run release builds the tag's code, not the branch it was started from.
           ref: ${{ inputs.tag || github.ref }}
+          # The Basalt theme is a submodule (vendor/basalt).
+          submodules: true
 
       # The release's version is its tag (`v1.2` or `1.2`): the app reports it, and compares it
       # with the latest release to offer updates, so it must not stay at Cargo.toml's.
@@ -86,7 +88,7 @@ jobs:
           mkdir -p dist/pkg
           cp target/release/$APP.exe README.md dist/pkg/
           cp LICENSE dist/pkg/LICENSE.txt
-          cp assets/Inter-LICENSE.txt assets/IBMPlexSans-OFL.txt vendor/rune-basalt/assets/fonts/SpaceGrotesk-OFL.txt vendor/rune-basalt/assets/fonts/JetBrainsMono-OFL.txt dist/pkg/
+          cp assets/Inter-LICENSE.txt assets/IBMPlexSans-OFL.txt vendor/basalt/themes/basalt/assets/fonts/SpaceGrotesk-OFL.txt vendor/basalt/themes/basalt/assets/fonts/JetBrainsMono-OFL.txt dist/pkg/
           # A portable zip, and an installer built with Inno Setup.
           (cd dist/pkg && 7z a ../$APP-${{ matrix.name }}-portable.zip .)
           VERSION=${LAYR_VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}
@@ -100,7 +102,7 @@ jobs:
         run: |
           cargo build --release --locked
           mkdir -p dist/$APP
-          cp target/release/$APP README.md LICENSE assets/Inter-LICENSE.txt assets/IBMPlexSans-OFL.txt vendor/rune-basalt/assets/fonts/SpaceGrotesk-OFL.txt vendor/rune-basalt/assets/fonts/JetBrainsMono-OFL.txt dist/$APP/
+          cp target/release/$APP README.md LICENSE assets/Inter-LICENSE.txt assets/IBMPlexSans-OFL.txt vendor/basalt/themes/basalt/assets/fonts/SpaceGrotesk-OFL.txt vendor/basalt/themes/basalt/assets/fonts/JetBrainsMono-OFL.txt dist/$APP/
           cp assets/icon/icon.png dist/$APP/layr.png
           cp packaging/linux/layr.desktop dist/$APP/
           tar -C dist -czf dist/$APP-${{ matrix.name }}.tar.gz $APP
@@ -117,7 +119,7 @@ jobs:
             target/aarch64-apple-darwin/release/$APP target/x86_64-apple-darwin/release/$APP
           VERSION=${LAYR_VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}
           sed "s/__VERSION__/$VERSION/g" packaging/macos/Info.plist > "$APPDIR/Info.plist"
-          cp LICENSE assets/Inter-LICENSE.txt assets/IBMPlexSans-OFL.txt vendor/rune-basalt/assets/fonts/SpaceGrotesk-OFL.txt vendor/rune-basalt/assets/fonts/JetBrainsMono-OFL.txt "$APPDIR/Resources/"
+          cp LICENSE assets/Inter-LICENSE.txt assets/IBMPlexSans-OFL.txt vendor/basalt/themes/basalt/assets/fonts/SpaceGrotesk-OFL.txt vendor/basalt/themes/basalt/assets/fonts/JetBrainsMono-OFL.txt "$APPDIR/Resources/"
           cp assets/icon/AppIcon.icns "$APPDIR/Resources/"
           # Ad-hoc signature so Apple silicon runs it; it is not notarized.
           codesign --force --deep --sign - "dist/Layr.app"

@@ -83,13 +83,16 @@ On macOS the app isn't notarized: the first time, right-click it and choose **Op
 ## Build
 
 ```bash
+git clone --recursive https://github.com/adamhlt/Layr.git
+cd Layr
 cargo run --release
 ```
 
 - **Toolchain**: `rust-toolchain.toml` pins the Rust version; rustup installs it on first use.
 - **Linux**: needs `libxkbcommon-dev` and `libwayland-dev`.
-- **Theme**: the interface uses the Basalt design system, vendored as the `rune-basalt` crate in
-  `vendor/rune-basalt` (see its README to update it).
+- **Theme**: the interface uses the [Basalt](https://github.com/adamhlt/Rune-Basalt) design system,
+  a submodule in `vendor/basalt`. In an existing clone, `git submodule update --init` fetches it;
+  `git submodule update --remote vendor/basalt` moves it to Basalt's latest commit.
 - **Release**: pushing a `v*` tag builds all three platforms into one GitHub release.
 
 ## Use of AI
